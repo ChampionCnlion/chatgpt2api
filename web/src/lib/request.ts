@@ -1,7 +1,6 @@
 import axios, {AxiosError, type AxiosRequestConfig} from "axios";
 
 import webConfig from "@/constants/common-env";
-import {clearStoredAuthKey, getStoredAuthKey} from "@/store/auth";
 
 type RequestConfig = AxiosRequestConfig & {
     redirectOnUnauthorized?: boolean;
@@ -9,19 +8,7 @@ type RequestConfig = AxiosRequestConfig & {
 
 const request = axios.create({
     baseURL: webConfig.apiUrl.replace(/\/$/, ""),
-});
-
-request.interceptors.request.use(async (config) => {
-    const nextConfig = {...config};
-    const authKey = await getStoredAuthKey();
-    const headers = {...(nextConfig.headers || {})} as Record<string, string>;
-    if (authKey && !headers.Authorization) {
-        headers.Authorization = `Bearer ${authKey}`;
-    }
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-expect-error
-    nextConfig.headers = headers;
-    return nextConfig;
+    withCredentials: true,
 });
 
 request.interceptors.response.use(
@@ -30,12 +17,8 @@ request.interceptors.response.use(
         const status = error.response?.status;
         const shouldRedirect = (error.config as RequestConfig | undefined)?.redirectOnUnauthorized !== false;
         if (status === 401 && shouldRedirect && typeof window !== "undefined") {
-            // Avoid redirect loop — only redirect if not already on /login
             if (!window.location.pathname.startsWith("/login")) {
-                await clearStoredAuthKey();
                 window.location.replace("/login");
-                // Return a never-resolving promise to prevent further error handling
-                // while the browser navigates away
                 return new Promise(() => {});
             }
         }

@@ -5,7 +5,7 @@ import { Github } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
 import webConfig from "@/constants/common-env";
-import { clearStoredAuthKey } from "@/store/auth";
+import { logout } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const navItems = [
@@ -19,7 +19,11 @@ export function TopNav() {
   const router = useRouter();
 
   const handleLogout = async () => {
-    await clearStoredAuthKey();
+    try {
+      await logout();
+    } catch {
+      // Ignore logout failures and force the browser back to the login page.
+    }
     router.replace("/login");
   };
 

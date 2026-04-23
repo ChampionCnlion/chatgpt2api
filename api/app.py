@@ -13,6 +13,7 @@ from api.support import resolve_web_asset, start_limited_account_watcher
 from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService
 from services.config import config
+from services.newapi_service import newapi_service
 
 
 def create_app() -> FastAPI:
@@ -32,12 +33,12 @@ def create_app() -> FastAPI:
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
+        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.include_router(ai.create_router(chatgpt_service))
+    app.include_router(ai.create_router(chatgpt_service, newapi_service))
     app.include_router(accounts.create_router())
     app.include_router(system.create_router(app_version))
     if config.images_dir.exists():

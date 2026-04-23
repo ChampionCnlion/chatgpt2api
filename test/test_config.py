@@ -58,6 +58,43 @@ class ConfigLoadingTests(unittest.TestCase):
                 else:
                     module.os.environ["CHATGPT2API_AUTH_KEY"] = old_env_auth_key
 
+    def test_config_store_normalizes_admin_password_and_newapi(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auth-key": "test-auth",
+                        "proxy": " http://127.0.0.1:7890 ",
+                        "base_url": "https://example.com/",
+                        "newapi": {
+                            "enabled": "true",
+                            "base_url": "https://newapi.example.com/",
+                            "api_key": " sk-test ",
+                            "timeout_seconds": "9",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            store = self.config_module.ConfigStore(config_path)
+            loaded = store.get()
+
+            self.assertEqual(loaded["auth-key"], "test-auth")
+            self.assertEqual(loaded["admin-password"], "test-auth")
+            self.assertEqual(loaded["proxy"], "http://127.0.0.1:7890")
+            self.assertEqual(loaded["base_url"], "https://example.com")
+            self.assertEqual(
+                loaded["newapi"],
+                {
+                    "enabled": True,
+                    "base_url": "https://newapi.example.com",
+                    "api_key": "sk-test",
+                    "timeout_seconds": 9,
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

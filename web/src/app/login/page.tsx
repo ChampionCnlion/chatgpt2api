@@ -9,24 +9,22 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { login } from "@/lib/api";
-import { setStoredAuthKey } from "@/store/auth";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [authKey, setAuthKey] = useState("");
+  const [password, setPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleLogin = async () => {
-    const normalizedAuthKey = authKey.trim();
-    if (!normalizedAuthKey) {
-      toast.error("请输入 密钥");
+    const normalizedPassword = password.trim();
+    if (!normalizedPassword) {
+      toast.error("请输入登录密码");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      await login(normalizedAuthKey);
-      await setStoredAuthKey(normalizedAuthKey);
+      await login(normalizedPassword);
       router.replace("/accounts");
     } catch (error) {
       const message = error instanceof Error ? error.message : "登录失败";
@@ -46,25 +44,25 @@ export default function LoginPage() {
             </div>
             <div className="space-y-2">
               <h1 className="text-3xl font-semibold tracking-tight text-stone-950">欢迎回来</h1>
-              <p className="text-sm leading-6 text-stone-500">输入密钥后继续使用账号管理和图片生成功能。</p>
+              <p className="text-sm leading-6 text-stone-500">输入管理密码后继续使用号池管理、CPA 同步和图片功能。</p>
             </div>
           </div>
 
           <div className="space-y-3">
-            <label htmlFor="auth-key" className="block text-sm font-medium text-stone-700">
-              密钥
+            <label htmlFor="admin-password" className="block text-sm font-medium text-stone-700">
+              管理密码
             </label>
             <Input
-              id="auth-key"
+              id="admin-password"
               type="password"
-              value={authKey}
-              onChange={(event) => setAuthKey(event.target.value)}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   void handleLogin();
                 }
               }}
-              placeholder="请输入密钥"
+              placeholder="请输入管理密码"
               className="h-13 rounded-2xl border-stone-200 bg-white px-4"
             />
           </div>

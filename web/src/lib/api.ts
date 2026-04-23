@@ -53,18 +53,30 @@ export type SettingsConfig = {
   proxy: string;
   base_url?: string;
   "auth-key"?: string;
+  "admin-password"?: string;
   refresh_account_interval_minute?: number | string;
+  newapi?: {
+    enabled?: boolean;
+    base_url?: string;
+    api_key?: string;
+    timeout_seconds?: number | string;
+  };
   [key: string]: unknown;
 };
 
-export async function login(authKey: string) {
-  const normalizedAuthKey = String(authKey || "").trim();
+export async function login(password: string) {
+  const normalizedPassword = String(password || "").trim();
   return httpRequest<{ ok: boolean }>("/auth/login", {
     method: "POST",
+    body: { password: normalizedPassword },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function logout() {
+  return httpRequest<{ ok: boolean }>("/auth/logout", {
+    method: "POST",
     body: {},
-    headers: {
-      Authorization: `Bearer ${normalizedAuthKey}`,
-    },
     redirectOnUnauthorized: false,
   });
 }
@@ -166,11 +178,16 @@ export type CPAPool = {
   name: string;
   base_url: string;
   import_job?: CPAImportJob | null;
+  recover_job?: CPAImportJob | null;
 };
 
 export type CPARemoteFile = {
   name: string;
   email: string;
+  type?: string;
+  provider?: string;
+  status_code?: number | null;
+  status_message?: string;
 };
 
 export type CPAImportJob = {
@@ -183,6 +200,7 @@ export type CPAImportJob = {
   added: number;
   skipped: number;
   refreshed: number;
+  deleted: number;
   failed: number;
   errors: Array<{ name: string; error: string }>;
 };
@@ -227,6 +245,17 @@ export async function startCPAImport(poolId: string, names: string[]) {
 
 export async function fetchCPAPoolImportJob(poolId: string) {
   return httpRequest<{ import_job: CPAImportJob | null }>(`/api/cpa/pools/${poolId}/import`);
+}
+
+export async function startCPARecover401(poolId: string) {
+  return httpRequest<{ recover_job: CPAImportJob | null }>(`/api/cpa/pools/${poolId}/recover-401`, {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function fetchCPAPoolRecoverJob(poolId: string) {
+  return httpRequest<{ recover_job: CPAImportJob | null }>(`/api/cpa/pools/${poolId}/recover-401`);
 }
 
 // ── Sub2API ────────────────────────────────────────────────────────

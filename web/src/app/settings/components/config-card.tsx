@@ -6,8 +6,9 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { testProxy, type ProxyTestResult } from "@/lib/api";
+import { testProxy, type ProxyTestResult, type SettingsConfig } from "@/lib/api";
 
 import { useSettingsStore } from "../store";
 
@@ -18,10 +19,17 @@ export function ConfigCard() {
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
   const setAuthKey = useSettingsStore((state) => state.setAuthKey);
+  const setAdminPassword = useSettingsStore((state) => state.setAdminPassword);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
+  const setNewAPIEnabled = useSettingsStore((state) => state.setNewAPIEnabled);
+  const setNewAPIBaseUrl = useSettingsStore((state) => state.setNewAPIBaseUrl);
+  const setNewAPIApiKey = useSettingsStore((state) => state.setNewAPIApiKey);
+  const setNewAPITimeoutSeconds = useSettingsStore((state) => state.setNewAPITimeoutSeconds);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
+  const newapiConfig: NonNullable<SettingsConfig["newapi"]> =
+    config?.newapi && typeof config.newapi === "object" ? config.newapi : {};
 
   const handleTestProxy = async () => {
     const candidate = String(config?.proxy || "").trim();
@@ -61,14 +69,25 @@ export function ConfigCard() {
       <CardContent className="space-y-4 p-6">
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
-            <label className="text-sm text-stone-700">登录密钥</label>
+            <label className="text-sm text-stone-700">API Auth Key</label>
             <Input
               value={String(config?.["auth-key"] || "")}
               onChange={(event) => setAuthKey(event.target.value)}
               placeholder="auth-key"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">用于后台登录验证。</p>
+            <p className="text-xs text-stone-500">外部调用 `/v1/*` 时使用的 Bearer Key。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">管理登录密码</label>
+            <Input
+              type="password"
+              value={String(config?.["admin-password"] || "")}
+              onChange={(event) => setAdminPassword(event.target.value)}
+              placeholder="admin-password"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">管理页面登录只校验这个密码。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">账号刷新间隔</label>
@@ -127,6 +146,56 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">用于生成图片结果的访问前缀地址。</p>
+          </div>
+        </div>
+
+        <div className="space-y-4 rounded-2xl border border-stone-200 bg-stone-50/80 p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <div className="text-sm font-medium text-stone-800">newapi 分发</div>
+              <p className="text-xs leading-5 text-stone-500">
+                开启后，`/v1/models`、图片接口、`chat/completions`、`responses` 都会转发到 newapi。
+              </p>
+            </div>
+            <label className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700">
+              <Checkbox
+                checked={Boolean(newapiConfig.enabled)}
+                onCheckedChange={(checked) => setNewAPIEnabled(Boolean(checked))}
+              />
+              启用
+            </label>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">newapi 地址</label>
+              <Input
+                value={String(newapiConfig.base_url || "")}
+                onChange={(event) => setNewAPIBaseUrl(event.target.value)}
+                placeholder="http://127.0.0.1:3000"
+                className="h-10 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">newapi Key</label>
+              <Input
+                type="password"
+                value={String(newapiConfig.api_key || "")}
+                onChange={(event) => setNewAPIApiKey(event.target.value)}
+                placeholder="sk-..."
+                className="h-10 rounded-xl border-stone-200 bg-white"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">newapi 超时</label>
+              <Input
+                value={String(newapiConfig.timeout_seconds || "")}
+                onChange={(event) => setNewAPITimeoutSeconds(event.target.value)}
+                placeholder="120"
+                className="h-10 rounded-xl border-stone-200 bg-white"
+              />
+              <p className="text-xs text-stone-500">单位秒，建议 60-300。</p>
+            </div>
           </div>
         </div>
 

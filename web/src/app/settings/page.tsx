@@ -26,8 +26,14 @@ function SettingsDataController() {
 
   useEffect(() => {
     const hasRunningJobs = pools.some((pool) => {
-      const status = pool.import_job?.status;
-      return status === "pending" || status === "running";
+      const importStatus = pool.import_job?.status;
+      const recoverStatus = pool.recover_job?.status;
+      return (
+        importStatus === "pending" ||
+        importStatus === "running" ||
+        recoverStatus === "pending" ||
+        recoverStatus === "running"
+      );
     });
     if (!hasRunningJobs) {
       return;

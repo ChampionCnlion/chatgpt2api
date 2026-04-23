@@ -124,7 +124,11 @@ export function ImportBrowserDialog() {
                     />
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium text-stone-700">{item.email || item.name}</div>
-                      <div className="truncate text-xs text-stone-400">{item.name}</div>
+                      <div className="truncate text-xs text-stone-400">
+                        {item.name}
+                        {item.status_code ? ` · HTTP ${item.status_code}` : ""}
+                        {item.status_message ? ` · ${item.status_message}` : ""}
+                      </div>
                     </div>
                   </label>
                 ))}
