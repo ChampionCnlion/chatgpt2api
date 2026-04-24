@@ -268,8 +268,12 @@ class AccountService:
             return None
         return self.update_account(access_token, remote_info)
 
-    def get_available_access_token(self) -> str:
-        attempted_tokens: set[str] = set()
+    def get_available_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+        attempted_tokens: set[str] = {
+            self._clean_token(token)
+            for token in (excluded_tokens or set())
+            if self._clean_token(token)
+        }
         while True:
             access_token = self._pick_next_candidate_token(excluded_tokens=attempted_tokens)
             attempted_tokens.add(access_token)

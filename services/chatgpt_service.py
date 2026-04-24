@@ -41,6 +41,23 @@ def is_token_invalid_error(message: str) -> bool:
     )
 
 
+def is_retryable_image_error(message: str) -> bool:
+    text = str(message or "").lower()
+    if is_token_invalid_error(text):
+        return True
+    retryable_markers = (
+        "no downloadable image result found",
+        "did not return image base64 result",
+        "bad gateway",
+        "gateway timeout",
+        "timed out",
+        "connection reset",
+        "server disconnected",
+        "stream closed",
+    )
+    return any(marker in text for marker in retryable_markers)
+
+
 def _save_image_bytes(image_data: bytes, base_url: str | None = None) -> str:
     file_hash = hashlib.md5(image_data).hexdigest()
     timestamp = int(time.time())
@@ -572,10 +589,21 @@ class ChatGPTService:
         emitted = False
         last_error = ""
         for index in range(1, n + 1):
+            attempted_tokens: set[str] = set()
             while True:
                 try:
-                    request_token = self.account_service.get_available_access_token()
+                    request_token = self.account_service.get_available_access_token(excluded_tokens=attempted_tokens)
                 except RuntimeError as exc:
+                    if attempted_tokens and last_error:
+                        logger.warning({
+                            "event": "image_generate_stop_after_retry",
+                            "index": index,
+                            "total": n,
+                            "error": last_error,
+                        })
+                        if emitted:
+                            return
+                        raise ImageGenerationError(last_error) from exc
                     last_error = str(exc)
                     logger.warning({
                         "event": "image_generate_stop",
@@ -586,6 +614,7 @@ class ChatGPTService:
                     if emitted:
                         return
                     raise ImageGenerationError(last_error or "image generation failed") from exc
+                attempted_tokens.add(request_token)
 
                 logger.info({
                     "event": "image_generate_start",
@@ -634,6 +663,14 @@ class ChatGPTService:
                             "request_token": request_token,
                         })
                         continue
+                    if is_retryable_image_error(message):
+                        logger.warning({
+                            "event": "image_generate_retry_next_token",
+                            "request_token": request_token,
+                            "index": index,
+                            "total": n,
+                        })
+                        continue
                     break
 
         if not emitted:
@@ -665,10 +702,21 @@ class ChatGPTService:
         last_error = ""
         emitted = False
         for index in range(1, n + 1):
+            attempted_tokens: set[str] = set()
             while True:
                 try:
-                    request_token = self.account_service.get_available_access_token()
+                    request_token = self.account_service.get_available_access_token(excluded_tokens=attempted_tokens)
                 except RuntimeError as exc:
+                    if attempted_tokens and last_error:
+                        logger.warning({
+                            "event": "image_generate_stream_stop_after_retry",
+                            "index": index,
+                            "total": n,
+                            "error": last_error,
+                        })
+                        if emitted:
+                            return
+                        raise ImageGenerationError(last_error) from exc
                     last_error = str(exc)
                     logger.warning({
                         "event": "image_generate_stream_stop",
@@ -679,6 +727,7 @@ class ChatGPTService:
                     if emitted:
                         return
                     raise ImageGenerationError(last_error or "image generation failed") from exc
+                attempted_tokens.add(request_token)
 
                 logger.info({
                     "event": "image_generate_stream_start",
@@ -735,6 +784,14 @@ class ChatGPTService:
                             "request_token": request_token,
                         })
                         continue
+                    if not emitted_for_request and is_retryable_image_error(message):
+                        logger.warning({
+                            "event": "image_generate_stream_retry_next_token",
+                            "request_token": request_token,
+                            "index": index,
+                            "total": n,
+                        })
+                        continue
                     raise ImageGenerationError(last_error or "image generation failed") from exc
 
     def edit_with_pool(
@@ -754,10 +811,19 @@ class ChatGPTService:
             raise ImageGenerationError("image is required")
 
         for index in range(1, n + 1):
+            attempted_tokens: set[str] = set()
             while True:
                 try:
-                    request_token = self.account_service.get_available_access_token()
+                    request_token = self.account_service.get_available_access_token(excluded_tokens=attempted_tokens)
                 except RuntimeError as exc:
+                    if attempted_tokens and last_error:
+                        logger.warning({
+                            "event": "image_edit_stop_after_retry",
+                            "index": index,
+                            "total": n,
+                            "error": last_error,
+                        })
+                        break
                     last_error = str(exc)
                     logger.warning({
                         "event": "image_edit_stop",
@@ -766,6 +832,7 @@ class ChatGPTService:
                         "error": last_error,
                     })
                     break
+                attempted_tokens.add(request_token)
 
                 logger.info({
                     "event": "image_edit_start",
@@ -813,6 +880,14 @@ class ChatGPTService:
                             "request_token": request_token,
                         })
                         continue
+                    if is_retryable_image_error(message):
+                        logger.warning({
+                            "event": "image_edit_retry_next_token",
+                            "request_token": request_token,
+                            "index": index,
+                            "total": n,
+                        })
+                        continue
                     break
 
         if not image_items:
@@ -840,10 +915,21 @@ class ChatGPTService:
         encoded_images = self._encode_images(normalized_images)
 
         for index in range(1, n + 1):
+            attempted_tokens: set[str] = set()
             while True:
                 try:
-                    request_token = self.account_service.get_available_access_token()
+                    request_token = self.account_service.get_available_access_token(excluded_tokens=attempted_tokens)
                 except RuntimeError as exc:
+                    if attempted_tokens and last_error:
+                        logger.warning({
+                            "event": "image_edit_stream_stop_after_retry",
+                            "index": index,
+                            "total": n,
+                            "error": last_error,
+                        })
+                        if emitted:
+                            return
+                        raise ImageGenerationError(last_error) from exc
                     last_error = str(exc)
                     logger.warning({
                         "event": "image_edit_stream_stop",
@@ -854,6 +940,7 @@ class ChatGPTService:
                     if emitted:
                         return
                     raise ImageGenerationError(last_error or "image edit failed") from exc
+                attempted_tokens.add(request_token)
 
                 logger.info({
                     "event": "image_edit_stream_start",
@@ -910,6 +997,14 @@ class ChatGPTService:
                         logger.warning({
                             "event": "image_edit_stream_remove_invalid_token",
                             "request_token": request_token,
+                        })
+                        continue
+                    if not emitted_for_request and is_retryable_image_error(message):
+                        logger.warning({
+                            "event": "image_edit_stream_retry_next_token",
+                            "request_token": request_token,
+                            "index": index,
+                            "total": n,
                         })
                         continue
                     raise ImageGenerationError(last_error or "image edit failed") from exc
@@ -986,11 +1081,13 @@ class ChatGPTService:
             encoded_images = self._encode_images([(image_data, "image.png", mime_type)])
 
         last_error = ""
+        attempted_tokens: set[str] = set()
         while True:
             try:
-                request_token = self.account_service.get_available_access_token()
+                request_token = self.account_service.get_available_access_token(excluded_tokens=attempted_tokens)
             except RuntimeError as exc:
-                raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+                raise HTTPException(status_code=502, detail={"error": last_error or str(exc)}) from exc
+            attempted_tokens.add(request_token)
 
             logger.info({
                 "event": "image_stream_start",
@@ -1031,6 +1128,13 @@ class ChatGPTService:
                     logger.warning({
                         "event": "image_stream_remove_invalid_token",
                         "request_token": request_token,
+                    })
+                    continue
+                if not emitted and is_retryable_image_error(message):
+                    logger.warning({
+                        "event": "image_stream_retry_next_token",
+                        "request_token": request_token,
+                        "model": model,
                     })
                     continue
                 raise HTTPException(status_code=502, detail={"error": last_error or "image generation failed"}) from exc
