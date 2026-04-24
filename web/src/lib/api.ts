@@ -64,6 +64,29 @@ export type SettingsConfig = {
   [key: string]: unknown;
 };
 
+export type RequestLogItem = {
+  request_id: string;
+  created_at: string;
+  method: string;
+  endpoint: string;
+  model: string;
+  success: boolean;
+  status_code: number;
+  duration_ms: number;
+  error: string;
+  client_ip: string;
+  user_agent: string;
+  request: Record<string, unknown>;
+  response: Record<string, unknown>;
+};
+
+export type RequestLogsResponse = {
+  items: RequestLogItem[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
 export async function login(password: string) {
   const normalizedPassword = String(password || "").trim();
   return httpRequest<{ ok: boolean }>("/auth/login", {
@@ -169,6 +192,14 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
     method: "POST",
     body: settings,
   });
+}
+
+export async function fetchRequestLogs(page = 1, pageSize = 50) {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  return httpRequest<RequestLogsResponse>(`/api/request-logs?${params.toString()}`);
 }
 
 // ── CPA (CLIProxyAPI) ──────────────────────────────────────────────
