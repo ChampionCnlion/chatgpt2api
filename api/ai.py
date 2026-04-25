@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import re
 from time import perf_counter
+from urllib.parse import urlparse
 import uuid
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
@@ -21,6 +22,7 @@ from utils.helper import extract_chat_prompt, extract_response_prompt, has_respo
 
 DATA_URL_IMAGE_RE = re.compile(r"(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)")
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
+PRIVATE_IPV4_RE = re.compile(r"^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)")
 
 
 class ImageGenerationRequest(BaseModel):
@@ -101,6 +103,20 @@ def _decode_base64_image(image_b64: object) -> bytes | None:
 
 def _append_preview_url(preview_urls: list[str], preview_url: str) -> None:
     normalized = str(preview_url or "").strip()
+    if normalized:
+        parsed = urlparse(normalized)
+        hostname = str(parsed.hostname or "").strip().lower()
+        is_internal_host = (
+            not hostname
+            or hostname in {"chatgpt2api", "localhost", "0.0.0.0", "::1"}
+            or bool(PRIVATE_IPV4_RE.match(hostname))
+        )
+        if parsed.path.startswith("/images/") and is_internal_host:
+            normalized = parsed.path
+            if parsed.query:
+                normalized = f"{normalized}?{parsed.query}"
+            if parsed.fragment:
+                normalized = f"{normalized}#{parsed.fragment}"
     if not normalized or normalized in preview_urls:
         return
     if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:

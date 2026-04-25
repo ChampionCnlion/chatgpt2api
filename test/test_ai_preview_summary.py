@@ -59,6 +59,30 @@ class AIPreviewSummaryTests(unittest.TestCase):
         self.assertEqual(summary.get("image_count"), 1)
         self.assertEqual(summary.get("preview_urls"), ["https://example.com/images/a.png"])
 
+    def test_chat_response_summary_normalizes_internal_preview_url_to_relative_path(self):
+        image_b64 = base64.b64encode(b"preview-image-bytes").decode("utf-8")
+        result = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": f"![image](data:image/png;base64,{image_b64})",
+                    }
+                }
+            ]
+        }
+
+        with patch(
+            "api.ai.save_request_log_preview",
+            return_value="http://chatgpt2api/images/request-logs/2026/04/25/example.webp",
+        ):
+            summary = _chat_response_summary(result, base_url="http://chatgpt2api")
+
+        self.assertEqual(
+            summary.get("preview_urls"),
+            ["/images/request-logs/2026/04/25/example.webp"],
+        )
+
     def test_collect_preview_urls_from_stream_chat_chunk(self):
         image_b64 = base64.b64encode(b"preview-image-bytes").decode("utf-8")
         chunk = {
