@@ -124,10 +124,17 @@ curl http://localhost:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{
-    "model": "gpt-image-1",
+    "model": "gpt-image-2",
     "prompt": "一只漂浮在太空里的猫",
     "n": 1,
-    "response_format": "b64_json"
+    "response_format": "url",
+    "size": "1536x1024",
+    "quality": "low",
+    "background": "opaque",
+    "output_format": "webp",
+    "output_compression": 70,
+    "moderation": "auto",
+    "partial_images": 0
   }'
 ```
 
@@ -140,7 +147,14 @@ curl http://localhost:8000/v1/images/generations \
 | `model`           | 图片模型，当前可用值以 `/v1/models` 返回结果为准，推荐使用 `gpt-image-1` |
 | `prompt`          | 图片生成提示词                                            |
 | `n`               | 生成数量，当前后端限制为 `1-4`                                 |
-| `response_format` | 当前请求模型中包含该字段，默认值为 `b64_json`                       |
+| `response_format` | 返回格式，支持 `b64_json` 或 `url`，默认 `b64_json`           |
+| `size`            | 图片尺寸，支持 `1024x1024`、`1536x1024`、`1024x1536`，也兼容 `1:1`、`16:9`、`9:16` |
+| `quality`         | 图片质量，支持 `auto`、`low`、`medium`、`high`               |
+| `background`      | 背景模式，支持 `auto`、`transparent`、`opaque`              |
+| `output_format`   | 输出格式，支持 `png`、`jpeg`、`webp`                        |
+| `output_compression` | 输出压缩率，范围 `0-100`                                |
+| `moderation`      | 内容审核等级，支持 `auto`、`low`                            |
+| `partial_images`  | 流式中间图数量，范围 `0-3`                                  |
 
 <br>
 </details>
@@ -155,9 +169,15 @@ OpenAI 兼容图片编辑接口，用于上传图片并生成编辑结果。
 ```bash
 curl http://localhost:8000/v1/images/edits \
   -H "Authorization: Bearer <auth-key>" \
-  -F "model=gpt-image-1" \
+  -F "model=gpt-image-2" \
   -F "prompt=把这张图改成赛博朋克夜景风格" \
   -F "n=1" \
+  -F "size=1024x1536" \
+  -F "quality=high" \
+  -F "background=opaque" \
+  -F "output_format=webp" \
+  -F "output_compression=75" \
+  -F "input_fidelity=high" \
   -F "image=@./input.png"
 ```
 
@@ -171,6 +191,14 @@ curl http://localhost:8000/v1/images/edits \
 | `prompt` | 图片编辑提示词                             |
 | `n`      | 生成数量，当前后端限制为 `1-4`                  |
 | `image`  | 需要编辑的图片文件，使用 multipart/form-data 上传 |
+| `size`   | 图片尺寸，支持 `1024x1024`、`1536x1024`、`1024x1536`，也兼容 `1:1`、`16:9`、`9:16` |
+| `quality` | 图片质量，支持 `auto`、`low`、`medium`、`high` |
+| `background` | 背景模式，支持 `auto`、`transparent`、`opaque` |
+| `output_format` | 输出格式，支持 `png`、`jpeg`、`webp` |
+| `output_compression` | 输出压缩率，范围 `0-100` |
+| `moderation` | 内容审核等级，支持 `auto`、`low` |
+| `partial_images` | 流式中间图数量，范围 `0-3` |
+| `input_fidelity` | 参考图保真度，支持 `low`、`high` |
 
 <br>
 </details>
@@ -187,14 +215,19 @@ curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{
-    "model": "gpt-image-1",
+    "model": "gpt-image-2",
     "messages": [
       {
         "role": "user",
         "content": "生成一张雨夜东京街头的赛博朋克猫"
       }
     ],
-    "n": 1
+    "n": 1,
+    "size": "16:9",
+    "quality": "high",
+    "background": "opaque",
+    "output_format": "webp",
+    "output_compression": 80
   }'
 ```
 
@@ -207,7 +240,8 @@ curl http://localhost:8000/v1/chat/completions \
 | `model`    | 图片模型，默认按图片生成场景处理     |
 | `messages` | 消息数组，需要是图片相关请求内容     |
 | `n`        | 生成数量，按当前实现解析为图片数量    |
-| `stream`   | 当前不支持，传入 `true` 会被拒绝 |
+| `stream`   | 支持流式返回，最终会输出图片内容或 markdown 图片内容 |
+| `size` / `quality` / `background` / `output_format` / `output_compression` | 与 `/v1/images/generations` 含义一致 |
 
 <br>
 </details>
@@ -224,11 +258,22 @@ curl http://localhost:8000/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{
-    "model": "gpt-5",
-    "input": "生成一张未来感城市天际线图片",
+    "model": "gpt-image-2",
+    "input": [
+      {
+        "role": "user",
+        "content": [
+          { "type": "input_text", "text": "生成一张未来感城市天际线图片" }
+        ]
+      }
+    ],
     "tools": [
       {
-        "type": "image_generation"
+        "type": "image_generation",
+        "size": "9:16",
+        "quality": "medium",
+        "background": "opaque",
+        "output_format": "png"
       }
     ]
   }'
@@ -240,10 +285,12 @@ curl http://localhost:8000/v1/responses \
 
 | 字段       | 说明                            |
 |:---------|:------------------------------|
-| `model`  | 响应中会回显该模型字段，但图片生成当前仍走图片生成兼容逻辑 |
+| `model`  | 图片场景推荐使用 `gpt-image-2` 或 `codex-gpt-image-2` |
 | `input`  | 输入内容，需要能解析出图片生成提示词            |
-| `tools`  | 必须包含 `image_generation` 工具请求  |
-| `stream` | 当前不支持，传入 `true` 会被拒绝          |
+| `tools`  | 必须包含 `image_generation` 工具请求，图片参数可放在该工具对象中 |
+| `stream` | 支持流式返回 |
+| `size` / `quality` / `background` / `output_format` / `output_compression` / `moderation` / `partial_images` | 可放在顶层或 `image_generation` 工具对象中 |
+| `input_fidelity` | 编辑场景可用，通常放在 `image_generation` 工具对象中 |
 
 <br>
 </details>

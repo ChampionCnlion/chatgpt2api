@@ -1,6 +1,7 @@
 import base64
 import json
 import hashlib
+from dataclasses import dataclass
 import uuid
 import time
 from pathlib import Path
@@ -13,6 +14,29 @@ from utils.log import logger
 
 IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+IMAGE_SIZE_ALIASES = {
+    "1:1": "1024x1024",
+    "16:9": "1536x1024",
+    "9:16": "1024x1536",
+}
+SUPPORTED_IMAGE_SIZES = {"auto", "1024x1024", "1536x1024", "1024x1536", *IMAGE_SIZE_ALIASES.keys()}
+SUPPORTED_IMAGE_QUALITIES = {"auto", "low", "medium", "high"}
+SUPPORTED_IMAGE_BACKGROUNDS = {"auto", "transparent", "opaque"}
+SUPPORTED_IMAGE_OUTPUT_FORMATS = {"png", "jpeg", "webp"}
+SUPPORTED_IMAGE_MODERATION = {"auto", "low"}
+SUPPORTED_IMAGE_INPUT_FIDELITY = {"low", "high"}
+
+
+@dataclass(frozen=True)
+class ImageRequestOptions:
+    size: str = "1024x1024"
+    quality: str = "auto"
+    background: str = "auto"
+    output_format: str = "png"
+    output_compression: int = 100
+    moderation: str = "auto"
+    partial_images: int = 0
+    input_fidelity: str = "low"
 
 
 def new_uuid() -> str:
@@ -222,6 +246,143 @@ def parse_image_count(raw_value: object) -> int:
     return value
 
 
+def _normalize_choice(
+    value: object,
+    *,
+    supported: set[str],
+    default: str,
+    field_name: str,
+    aliases: dict[str, str] | None = None,
+) -> str:
+    normalized = str(value or "").strip().lower() or default
+    if aliases:
+        normalized = aliases.get(normalized, normalized)
+    if normalized not in supported:
+        supported_values = ", ".join(sorted(supported))
+        raise HTTPException(status_code=400, detail={"error": f"{field_name} must be one of: {supported_values}"})
+    return normalized
+
+
+def normalize_image_size(value: object, *, default: str = "1024x1024") -> str:
+    return _normalize_choice(
+        value,
+        supported=SUPPORTED_IMAGE_SIZES,
+        default=default,
+        field_name="size",
+        aliases=IMAGE_SIZE_ALIASES,
+    )
+
+
+def normalize_image_quality(value: object, *, default: str = "auto") -> str:
+    return _normalize_choice(
+        value,
+        supported=SUPPORTED_IMAGE_QUALITIES,
+        default=default,
+        field_name="quality",
+    )
+
+
+def normalize_image_background(value: object, *, default: str = "auto") -> str:
+    return _normalize_choice(
+        value,
+        supported=SUPPORTED_IMAGE_BACKGROUNDS,
+        default=default,
+        field_name="background",
+    )
+
+
+def normalize_image_output_format(value: object, *, default: str = "png") -> str:
+    aliases = {"jpg": "jpeg"}
+    return _normalize_choice(
+        value,
+        supported=SUPPORTED_IMAGE_OUTPUT_FORMATS,
+        default=default,
+        field_name="output_format",
+        aliases=aliases,
+    )
+
+
+def normalize_image_moderation(value: object, *, default: str = "auto") -> str:
+    return _normalize_choice(
+        value,
+        supported=SUPPORTED_IMAGE_MODERATION,
+        default=default,
+        field_name="moderation",
+    )
+
+
+def normalize_image_input_fidelity(value: object, *, default: str = "low") -> str:
+    return _normalize_choice(
+        value,
+        supported=SUPPORTED_IMAGE_INPUT_FIDELITY,
+        default=default,
+        field_name="input_fidelity",
+    )
+
+
+def normalize_output_compression(value: object, *, default: int = 100) -> int:
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail={"error": "output_compression must be an integer"}) from exc
+    if normalized < 0 or normalized > 100:
+        raise HTTPException(status_code=400, detail={"error": "output_compression must be between 0 and 100"})
+    return normalized
+
+
+def normalize_partial_images(value: object, *, default: int = 0) -> int:
+    if value is None or str(value).strip() == "":
+        return default
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail={"error": "partial_images must be an integer"}) from exc
+    if normalized < 0 or normalized > 3:
+        raise HTTPException(status_code=400, detail={"error": "partial_images must be between 0 and 3"})
+    return normalized
+
+
+def normalize_image_options(
+    data: dict[str, object] | None = None,
+    *,
+    default_size: str = "1024x1024",
+) -> ImageRequestOptions:
+    payload = data if isinstance(data, dict) else {}
+    options = ImageRequestOptions(
+        size=normalize_image_size(payload.get("size"), default=default_size),
+        quality=normalize_image_quality(payload.get("quality")),
+        background=normalize_image_background(payload.get("background")),
+        output_format=normalize_image_output_format(payload.get("output_format")),
+        output_compression=normalize_output_compression(payload.get("output_compression")),
+        moderation=normalize_image_moderation(payload.get("moderation")),
+        partial_images=normalize_partial_images(payload.get("partial_images")),
+        input_fidelity=normalize_image_input_fidelity(payload.get("input_fidelity")),
+    )
+    if options.background == "transparent" and options.output_format == "jpeg":
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "transparent background is only supported with png or webp output_format"},
+        )
+    return options
+
+
+def extract_response_image_options(body: dict[str, object]) -> ImageRequestOptions:
+    tools = body.get("tools")
+    image_generation_tool: dict[str, object] = {}
+    if isinstance(tools, list):
+        for tool in tools:
+            if isinstance(tool, dict) and str(tool.get("type") or "").strip() == "image_generation":
+                image_generation_tool = tool
+                break
+    merged = {
+        **({key: value for key, value in body.items() if isinstance(key, str)}),
+        **image_generation_tool,
+    }
+    return normalize_image_options(merged)
+
+
 def build_chat_image_completion(model: str, image_result: dict[str, object]) -> dict[str, object]:
     created = int(image_result.get("created") or time.time())
     return {
@@ -246,5 +407,6 @@ def build_chat_image_markdown_content(image_result: dict[str, object]) -> str:
             continue
         b64_json = str(item.get("b64_json") or "").strip()
         if b64_json:
-            markdown_images.append(f"![image_{index}](data:image/png;base64,{b64_json})")
+            mime_type = str(item.get("mime_type") or "image/png").strip() or "image/png"
+            markdown_images.append(f"![image_{index}](data:{mime_type};base64,{b64_json})")
     return "\n\n".join(markdown_images) if markdown_images else "Image generation completed."

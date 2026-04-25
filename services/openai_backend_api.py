@@ -14,7 +14,7 @@ from PIL import Image
 
 from services.account_service import account_service
 from services.proxy_service import proxy_settings
-from utils.helper import build_chat_image_markdown_content, ensure_ok, new_uuid, parse_sse_lines
+from utils.helper import ImageRequestOptions, build_chat_image_markdown_content, ensure_ok, new_uuid, parse_sse_lines
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
 from utils.turnstile import solve_turnstile_token
@@ -292,18 +292,31 @@ class OpenAIBackendAPI:
         data.sort(key=lambda item: item["id"])
         return {"object": "list", "data": data}
 
-    def _build_image_prompt(self, prompt: str, size: str) -> str:
-        """把标准图片 prompt 和宽高比转成底层图片生成 prompt。"""
-        if not size:
+    def _build_image_prompt(self, prompt: str, options: ImageRequestOptions, *, image_count: int = 0) -> str:
+        """把标准图片参数转成底层图片生成 prompt 约束。"""
+        hints: list[str] = []
+        size_hint = {
+            "1024x1024": "输出为接近 1:1 的正方形构图，主体清晰居中。",
+            "1536x1024": "输出为横向宽幅构图，适合景观或海报式展示。",
+            "1024x1536": "输出为纵向竖版构图，适合人物或手机海报画幅。",
+        }.get(options.size, "")
+        if size_hint:
+            hints.append(size_hint)
+        if options.quality == "high":
+            hints.append("优先高质量细节、纹理、光影和完成度。")
+        elif options.quality == "medium":
+            hints.append("平衡细节质量与生成速度。")
+        elif options.quality == "low":
+            hints.append("优先快速生成，细节可以适当简化。")
+        if options.background == "transparent":
+            hints.append("背景应透明，只保留主体，不要额外实色底。")
+        elif options.background == "opaque":
+            hints.append("背景应为非透明实体背景，画面完整。")
+        if image_count > 0 and options.input_fidelity == "high":
+            hints.append("尽量保留参考图中的主体结构、人物特征、文字标识和关键细节。")
+        if not hints:
             return prompt
-        if size not in {"1:1", "16:9", "9:16"}:
-            return f"{prompt.strip()}\n\n输出图片，宽高比为 {size}。"
-        hint = {
-            "1:1": "输出为 1:1 正方形构图，主体居中，适合正方形画幅。",
-            "16:9": "输出为 16:9 横屏构图，适合宽画幅展示。",
-            "9:16": "输出为 9:16 竖屏构图，适合竖版画幅展示。",
-        }[size]
-        return f"{prompt.strip()}\n\n{hint}"
+        return f"{prompt.strip()}\n\n" + "\n".join(hints)
 
     def _image_model_slug(self, model: str) -> str:
         """把标准图片模型名映射到底层 model slug。"""
@@ -629,13 +642,46 @@ class OpenAIBackendAPI:
         data = response.json()
         return data.get("download_url") or data.get("url") or ""
 
-    def _save_image_bytes(self, image_data: bytes) -> str:
-        file_name = f"{int(time.time())}_{new_uuid().replace('-', '')}.png"
+    @staticmethod
+    def _image_format_to_extension(output_format: str) -> str:
+        return "jpg" if output_format == "jpeg" else output_format
+
+    def _save_image_bytes(self, image_data: bytes, output_format: str = "png") -> str:
+        extension = self._image_format_to_extension(output_format)
+        file_name = f"{int(time.time())}_{new_uuid().replace('-', '')}.{extension}"
         relative_dir = Path(time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))
         file_path = config.images_dir / relative_dir / file_name
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_bytes(image_data)
         return f"{config.base_url}/images/{relative_dir.as_posix()}/{file_name}"
+
+    @staticmethod
+    def _render_output_image(image_data: bytes, options: ImageRequestOptions) -> tuple[bytes, str]:
+        with Image.open(BytesIO(image_data)) as raw_image:
+            image = raw_image.copy()
+        if options.output_format == "jpeg":
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            if "A" in image.getbands():
+                flattened = Image.new("RGBA", image.size, (255, 255, 255, 255))
+                image = Image.alpha_composite(flattened, image.convert("RGBA")).convert("RGB")
+            elif image.mode != "RGB":
+                image = image.convert("RGB")
+        else:
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            if options.background == "opaque" and "A" in image.getbands():
+                flattened = Image.new("RGBA", image.size, (255, 255, 255, 255))
+                image = Image.alpha_composite(flattened, image.convert("RGBA"))
+
+        output = BytesIO()
+        save_kwargs: dict[str, Any] = {}
+        pil_format = options.output_format.upper()
+        if options.output_format in {"jpeg", "webp"}:
+            save_kwargs["quality"] = options.output_compression
+        image.save(output, format=pil_format, **save_kwargs)
+        mime_type = f"image/{options.output_format}"
+        return output.getvalue(), mime_type
 
     def _resolve_image_urls(self, conversation_id: str, file_ids: list[str], sediment_ids: list[str]) -> list[str]:
         """把图片结果 id 解析成可下载 URL。"""
@@ -700,7 +746,7 @@ class OpenAIBackendAPI:
         })
         return urls
 
-    def _image_response(self, urls: list[str], response_format: str) -> Dict[str, Any]:
+    def _image_response(self, urls: list[str], response_format: str, options: ImageRequestOptions) -> Dict[str, Any]:
         """把图片结果整理成 OpenAI `/v1/images/*` 风格结构。"""
         if response_format not in {"url", "b64_json"}:
             raise ValueError("response_format must be 'url' or 'b64_json'")
@@ -708,13 +754,33 @@ class OpenAIBackendAPI:
         for url in urls:
             response = self.session.get(url, timeout=120)
             ensure_ok(response, "image_download")
+            rendered_bytes, mime_type = self._render_output_image(response.content, options)
             if response_format == "b64_json":
-                data.append({"b64_json": base64.b64encode(response.content).decode()})
+                data.append({
+                    "b64_json": base64.b64encode(rendered_bytes).decode(),
+                    "mime_type": mime_type,
+                    "output_format": options.output_format,
+                })
             else:
-                data.append({"url": self._save_image_bytes(response.content)})
-        return {"created": int(time.time()), "data": data}
+                data.append({
+                    "url": self._save_image_bytes(rendered_bytes, options.output_format),
+                    "mime_type": mime_type,
+                    "output_format": options.output_format,
+                })
+        return {
+            "created": int(time.time()),
+            "data": data,
+            "size": options.size,
+            "quality": options.quality,
+            "background": options.background,
+            "output_format": options.output_format,
+            "output_compression": options.output_compression,
+            "moderation": options.moderation,
+            "partial_images": options.partial_images,
+            "input_fidelity": options.input_fidelity,
+        }
 
-    def _run_image_task(self, prompt: str, model: str, size: str, images: Optional[list[str]] = None,
+    def _run_image_task(self, prompt: str, model: str, options: ImageRequestOptions, images: Optional[list[str]] = None,
                         response_format: str = "url") -> Dict[str, Any]:
         """执行图片生成或图片编辑主流程。"""
         if not self.access_token:
@@ -723,7 +789,11 @@ class OpenAIBackendAPI:
             "event": "image_task_start",
             "prompt": prompt,
             "model": model,
-            "size": size,
+            "size": options.size,
+            "quality": options.quality,
+            "background": options.background,
+            "output_format": options.output_format,
+            "output_compression": options.output_compression,
             "image_count": len(images or []),
         })
         references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images or [], start=1)]
@@ -738,7 +808,7 @@ class OpenAIBackendAPI:
             "so_token_present": bool(requirements.so_token),
             "raw_finalize": requirements.raw_finalize,
         })
-        final_prompt = self._build_image_prompt(prompt, size)
+        final_prompt = self._build_image_prompt(prompt, options, image_count=len(images or []))
         logger.debug({"event": "image_final_prompt", "final_prompt": final_prompt})
         conduit_token = self._prepare_image_conversation(final_prompt, requirements, model)
         logger.debug({"event": "image_conduit_ready", "conduit_token_present": bool(conduit_token)})
@@ -784,7 +854,7 @@ class OpenAIBackendAPI:
                 "no downloadable image result found; "
                 f"conversation_id={conversation_id}, file_ids={file_ids}, sediment_ids={sediment_ids}"
             )
-        return self._image_response(urls, response_format)
+        return self._image_response(urls, response_format, options)
 
     def _build_codex_response_input(self, prompt: str, images: Optional[list[str]] = None) -> list[Dict[str, Any]]:
         if not images:
@@ -804,7 +874,12 @@ class OpenAIBackendAPI:
         logger.debug({"event": "codex_responses_events_collected", "event_count": len(events)})
         return events
 
-    def _codex_image_response(self, events: list[Dict[str, Any]], response_format: str) -> Dict[str, Any]:
+    def _codex_image_response(
+        self,
+        events: list[Dict[str, Any]],
+        response_format: str,
+        options: ImageRequestOptions,
+    ) -> Dict[str, Any]:
         if response_format not in {"url", "b64_json"}:
             raise ValueError("response_format must be 'url' or 'b64_json'")
         image_item = {}
@@ -821,11 +896,20 @@ class OpenAIBackendAPI:
         image_b64 = image_item.get("result", "")
         if not image_b64:
             raise RuntimeError("codex responses did not return image base64 result")
+        rendered_bytes, mime_type = self._render_output_image(base64.b64decode(image_b64), options)
         data = []
         if response_format == "b64_json":
-            data.append({"b64_json": image_b64})
+            data.append({
+                "b64_json": base64.b64encode(rendered_bytes).decode(),
+                "mime_type": mime_type,
+                "output_format": options.output_format,
+            })
         else:
-            data.append({"url": self._save_image_bytes(base64.b64decode(image_b64))})
+            data.append({
+                "url": self._save_image_bytes(rendered_bytes, options.output_format),
+                "mime_type": mime_type,
+                "output_format": options.output_format,
+            })
         return {
             "created": response_payload.get("created_at") or int(time.time()),
             "data": data,
@@ -835,16 +919,22 @@ class OpenAIBackendAPI:
             "response_id": response_payload.get("id"),
             "status": response_payload.get("status"),
             "revised_prompt": image_item.get("revised_prompt"),
-            "size": image_item.get("size"),
-            "output_format": image_item.get("output_format"),
+            "size": image_item.get("size") or options.size,
+            "quality": image_item.get("quality") or options.quality,
+            "background": image_item.get("background") or options.background,
+            "output_format": options.output_format,
+            "output_compression": options.output_compression,
+            "moderation": options.moderation,
+            "partial_images": options.partial_images,
+            "input_fidelity": options.input_fidelity,
             "response": response_payload,
         }
 
-    def _run_codex_image_task(self, prompt: str, response_format: str = "url",
+    def _run_codex_image_task(self, prompt: str, options: ImageRequestOptions, response_format: str = "url",
                               images: Optional[list[str]] = None) -> Dict[str, Any]:
         logger.debug({"event": "codex_image_task_start", "prompt": prompt, "image_count": len(images or [])})
         events = self._collect_codex_events(prompt=prompt, model=CODEX_IMAGE_MODEL, images=images)
-        result = self._codex_image_response(events, response_format)
+        result = self._codex_image_response(events, response_format, options)
         logger.debug({
             "event": "codex_image_task_done",
             "response_id": result.get("response_id"),
@@ -921,6 +1011,7 @@ class OpenAIBackendAPI:
         prompt: str,
         model: str = "gpt-image-2",
         images: Optional[list[str]] = None,
+        options: ImageRequestOptions | None = None,
     ) -> Iterator[Dict[str, Any]]:
         if not self.access_token:
             raise RuntimeError("access_token is required for image endpoints")
@@ -932,11 +1023,12 @@ class OpenAIBackendAPI:
         conversation_id = ""
         file_ids: list[str] = []
         sediment_ids: list[str] = []
+        image_options = options or ImageRequestOptions()
 
         references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images or [], start=1)]
         self._bootstrap()
         requirements = self._get_auth_chat_requirements()
-        final_prompt = self._build_image_prompt(prompt, "1:1")
+        final_prompt = self._build_image_prompt(prompt, image_options, image_count=len(images or []))
         conduit_token = self._prepare_image_conversation(final_prompt, requirements, model)
         sse = self._start_image_generation(final_prompt, requirements, conduit_token, model, references)
         try:
@@ -1031,7 +1123,7 @@ class OpenAIBackendAPI:
                 f"conversation_id={conversation_id}, file_ids={file_ids}, sediment_ids={sediment_ids}"
             )
 
-        image_content = build_chat_image_markdown_content(self._image_response(urls, "b64_json"))
+        image_content = build_chat_image_markdown_content(self._image_response(urls, "b64_json", image_options))
         if not sent_role:
             sent_role = True
             yield {
@@ -1280,22 +1372,65 @@ class OpenAIBackendAPI:
         """返回当前模式下可用模型，格式对齐 OpenAI `/v1/models`。"""
         return self._normalize_models(self._get_models_raw(authenticated=bool(self.access_token)))
 
-    def images_generations(self, prompt: str, model: str = "gpt-image-2", size: str = "1:1",
-                           response_format: str = "url") -> Dict[str, Any]:
+    def images_generations(
+        self,
+        prompt: str,
+        model: str = "gpt-image-2",
+        size: str = "1024x1024",
+        quality: str = "auto",
+        background: str = "auto",
+        output_format: str = "png",
+        output_compression: int = 100,
+        moderation: str = "auto",
+        partial_images: int = 0,
+        response_format: str = "url",
+    ) -> Dict[str, Any]:
         """返回 OpenAI `/v1/images/generations` 风格结果。"""
+        options = ImageRequestOptions(
+            size=size,
+            quality=quality,
+            background=background,
+            output_format=output_format,
+            output_compression=output_compression,
+            moderation=moderation,
+            partial_images=partial_images,
+        )
         if self._is_codex_image_model(model):
-            return self._run_codex_image_task(prompt, response_format=response_format)
-        return self._run_image_task(prompt, model, size, response_format=response_format)
+            return self._run_codex_image_task(prompt, options, response_format=response_format)
+        return self._run_image_task(prompt, model, options, response_format=response_format)
 
-    def images_edits(self, image: str | list[str], prompt: str, model: str = "gpt-image-2", size: str = "1:1",
-                     response_format: str = "url") -> Dict[str, Any]:
+    def images_edits(
+        self,
+        image: str | list[str],
+        prompt: str,
+        model: str = "gpt-image-2",
+        size: str = "1024x1024",
+        quality: str = "auto",
+        background: str = "auto",
+        output_format: str = "png",
+        output_compression: int = 100,
+        input_fidelity: str = "low",
+        moderation: str = "auto",
+        partial_images: int = 0,
+        response_format: str = "url",
+    ) -> Dict[str, Any]:
         """返回 OpenAI `/v1/images/edits` 风格结果。"""
         images = [image] if isinstance(image, str) else image
         if not images:
             raise ValueError("image is required for image edits")
+        options = ImageRequestOptions(
+            size=size,
+            quality=quality,
+            background=background,
+            output_format=output_format,
+            output_compression=output_compression,
+            moderation=moderation,
+            partial_images=partial_images,
+            input_fidelity=input_fidelity,
+        )
         if self._is_codex_image_model(model):
-            return self._run_codex_image_task(prompt, response_format=response_format, images=images)
-        return self._run_image_task(prompt, model, size, images=images, response_format=response_format)
+            return self._run_codex_image_task(prompt, options, response_format=response_format, images=images)
+        return self._run_image_task(prompt, model, options, images=images, response_format=response_format)
 
     def _chat_completion_response(self, model: str, messages: list[Dict[str, Any]], text: str) -> Dict[str, Any]:
         """把对话结果整理成 OpenAI `/v1/chat/completions` 风格结构。"""

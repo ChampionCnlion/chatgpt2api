@@ -18,7 +18,14 @@ from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService, ImageGenerationError
 from services.newapi_service import NewAPIRequestError, NewAPIService
 from services.request_log_service import MAX_PREVIEW_IMAGES_PER_LOG, request_log_store, save_request_log_preview
-from utils.helper import extract_chat_prompt, extract_response_prompt, has_response_image_generation_tool, is_image_chat_request
+from utils.helper import (
+    extract_chat_prompt,
+    extract_response_prompt,
+    extract_response_image_options,
+    has_response_image_generation_tool,
+    is_image_chat_request,
+    normalize_image_options,
+)
 
 DATA_URL_IMAGE_RE = re.compile(r"(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)")
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -30,6 +37,13 @@ class ImageGenerationRequest(BaseModel):
     model: str = "gpt-image-2"
     n: int = Field(default=1, ge=1, le=4)
     response_format: str = "b64_json"
+    size: str = "1024x1024"
+    quality: str = "auto"
+    background: str = "auto"
+    output_format: str = "png"
+    output_compression: int = 100
+    moderation: str = "auto"
+    partial_images: int = 0
     history_disabled: bool = True
     stream: bool | None = None
 
@@ -42,6 +56,14 @@ class ChatCompletionRequest(BaseModel):
     stream: bool | None = None
     modalities: list[str] | None = None
     messages: list[dict[str, object]] | None = None
+    size: str | None = None
+    quality: str | None = None
+    background: str | None = None
+    output_format: str | None = None
+    output_compression: int | None = None
+    moderation: str | None = None
+    partial_images: int | None = None
+    input_fidelity: str | None = None
 
 
 class ResponseCreateRequest(BaseModel):
@@ -51,6 +73,14 @@ class ResponseCreateRequest(BaseModel):
     tools: list[dict[str, object]] | None = None
     tool_choice: object | None = None
     stream: bool | None = None
+    size: str | None = None
+    quality: str | None = None
+    background: str | None = None
+    output_format: str | None = None
+    output_compression: int | None = None
+    moderation: str | None = None
+    partial_images: int | None = None
+    input_fidelity: str | None = None
 
 
 def _raise_newapi_http_error(exc: NewAPIRequestError) -> None:
@@ -59,6 +89,23 @@ def _raise_newapi_http_error(exc: NewAPIRequestError) -> None:
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _append_image_options_summary(
+    summary: dict[str, object],
+    image_options,
+    *,
+    include_input_fidelity: bool = False,
+) -> None:
+    summary["size"] = image_options.size
+    summary["quality"] = image_options.quality
+    summary["background"] = image_options.background
+    summary["output_format"] = image_options.output_format
+    summary["output_compression"] = image_options.output_compression
+    summary["moderation"] = image_options.moderation
+    summary["partial_images"] = image_options.partial_images
+    if include_input_fidelity:
+        summary["input_fidelity"] = image_options.input_fidelity
 
 
 def _truncate_text(value: object, *, limit: int = 240) -> str:
@@ -258,6 +305,19 @@ def _image_response_summary(result: object, *, base_url: str | None = None) -> d
         "image_count": image_count,
         "created": int(created) if str(created or "").strip() else None,
     }
+    for key in (
+        "size",
+        "quality",
+        "background",
+        "output_format",
+        "output_compression",
+        "moderation",
+        "partial_images",
+        "input_fidelity",
+    ):
+        value = result.get(key)
+        if value not in (None, ""):
+            summary[key] = value
     preview_urls = _collect_preview_urls_from_result(result, base_url=base_url)
     if preview_urls:
         summary["preview_urls"] = preview_urls
@@ -460,10 +520,18 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
         request_id = uuid.uuid4().hex
         started_at = perf_counter()
         preview_base_url = resolve_image_base_url(request)
+        image_options = normalize_image_options(body.model_dump(mode="python"))
         request_summary = {
             "prompt_preview": _truncate_text(body.prompt),
             "n": body.n,
             "response_format": body.response_format,
+            "size": image_options.size,
+            "quality": image_options.quality,
+            "background": image_options.background,
+            "output_format": image_options.output_format,
+            "output_compression": image_options.output_compression,
+            "moderation": image_options.moderation,
+            "partial_images": image_options.partial_images,
             "stream": bool(body.stream),
         }
 
@@ -525,6 +593,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                             body.n,
                             body.response_format,
                             base_url,
+                            image_options,
                         ),
                         request,
                         request_id=request_id,
@@ -547,6 +616,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 body.n,
                 body.response_format,
                 base_url,
+                image_options,
             )
             _write_request_log(
                 request,
@@ -625,17 +695,45 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
         model: str = Form(default="gpt-image-2"),
         n: int = Form(default=1),
         response_format: str = Form(default="b64_json"),
+        size: str = Form(default="1024x1024"),
+        quality: str = Form(default="auto"),
+        background: str = Form(default="auto"),
+        output_format: str = Form(default="png"),
+        output_compression: int = Form(default=100),
+        moderation: str = Form(default="auto"),
+        partial_images: int = Form(default=0),
+        input_fidelity: str = Form(default="low"),
         stream: bool | None = Form(default=None),
     ):
         require_api_access(request, authorization)
         request_id = uuid.uuid4().hex
         started_at = perf_counter()
         preview_base_url = resolve_image_base_url(request)
+        image_options = normalize_image_options(
+            {
+                "size": size,
+                "quality": quality,
+                "background": background,
+                "output_format": output_format,
+                "output_compression": output_compression,
+                "moderation": moderation,
+                "partial_images": partial_images,
+                "input_fidelity": input_fidelity,
+            }
+        )
         uploads = [*(image or []), *(image_list or [])]
         request_summary = {
             "prompt_preview": _truncate_text(prompt),
             "n": n,
             "response_format": response_format,
+            "size": image_options.size,
+            "quality": image_options.quality,
+            "background": image_options.background,
+            "output_format": image_options.output_format,
+            "output_compression": image_options.output_compression,
+            "moderation": image_options.moderation,
+            "partial_images": image_options.partial_images,
+            "input_fidelity": image_options.input_fidelity,
             "stream": bool(stream),
             "upload_count": len(uploads),
             "upload_names": [str(upload.filename or "image.png") for upload in uploads[:5]],
@@ -696,6 +794,14 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 "model": model,
                 "n": str(n),
                 "response_format": response_format,
+                "size": image_options.size,
+                "quality": image_options.quality,
+                "background": image_options.background,
+                "output_format": image_options.output_format,
+                "output_compression": str(image_options.output_compression),
+                "moderation": image_options.moderation,
+                "partial_images": str(image_options.partial_images),
+                "input_fidelity": image_options.input_fidelity,
             }
             if stream is not None:
                 form_data["stream"] = "true" if stream else "false"
@@ -761,7 +867,15 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                     raise_image_quota_error(RuntimeError("no available image quota"))
                 result = StreamingResponse(
                     _logged_sse_json_stream(
-                        chatgpt_service.stream_image_edit(prompt, images, model, n, response_format, base_url),
+                        chatgpt_service.stream_image_edit(
+                            prompt,
+                            images,
+                            model,
+                            n,
+                            response_format,
+                            base_url,
+                            image_options,
+                        ),
                         request,
                         request_id=request_id,
                         started_at=started_at,
@@ -784,6 +898,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 n,
                 response_format,
                 base_url,
+                image_options,
             )
             _write_request_log(
                 request,
@@ -856,6 +971,22 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
             "image_request": image_request,
             "message_count": len(payload.get("messages") or []) if isinstance(payload.get("messages"), list) else 0,
         }
+        if image_request:
+            try:
+                _append_image_options_summary(request_summary, normalize_image_options(payload))
+            except HTTPException as exc:
+                _write_request_log(
+                    request,
+                    request_id=request_id,
+                    started_at=started_at,
+                    endpoint=request.url.path,
+                    model=str(payload.get("model") or ""),
+                    request_summary=request_summary,
+                    status_code=exc.status_code,
+                    success=False,
+                    error=_extract_error_message(exc),
+                )
+                raise
 
         if newapi_service.is_enabled():
             request_headers = dict(request.headers)
@@ -988,6 +1119,26 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
             "tool_count": len(payload.get("tools") or []) if isinstance(payload.get("tools"), list) else 0,
             "image_request": response_image_request,
         }
+        if response_image_request:
+            try:
+                _append_image_options_summary(
+                    request_summary,
+                    extract_response_image_options(payload),
+                    include_input_fidelity=True,
+                )
+            except HTTPException as exc:
+                _write_request_log(
+                    request,
+                    request_id=request_id,
+                    started_at=started_at,
+                    endpoint=request.url.path,
+                    model=str(payload.get("model") or ""),
+                    request_summary=request_summary,
+                    status_code=exc.status_code,
+                    success=False,
+                    error=_extract_error_message(exc),
+                )
+                raise
 
         if newapi_service.is_enabled():
             request_headers = dict(request.headers)
@@ -1008,6 +1159,8 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                     return result
 
                 result = await run_in_threadpool(newapi_service.create_response, request_headers, payload)
+                response_summary = _chat_response_summary(result, base_url=preview_base_url)
+                response_summary["image_request"] = response_image_request
                 _write_request_log(
                     request,
                     request_id=request_id,
@@ -1017,7 +1170,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                     request_summary=request_summary,
                     status_code=200,
                     success=True,
-                    response_summary=_chat_response_summary(result, base_url=preview_base_url),
+                    response_summary=response_summary,
                 )
                 return result
             except NewAPIRequestError as exc:
@@ -1054,6 +1207,8 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 return result
 
             result = await run_in_threadpool(chatgpt_service.create_response, payload)
+            response_summary = _chat_response_summary(result, base_url=preview_base_url)
+            response_summary["image_request"] = response_image_request
             _write_request_log(
                 request,
                 request_id=request_id,
@@ -1063,7 +1218,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 request_summary=request_summary,
                 status_code=200,
                 success=True,
-                response_summary=_chat_response_summary(result, base_url=preview_base_url),
+                response_summary=response_summary,
             )
             return result
         except HTTPException as exc:

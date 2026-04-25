@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from services.chatgpt_service import ChatGPTService, ImageGenerationError
+from services.chatgpt_service import ChatGPTService, ImageGenerationError, is_retryable_image_error
 
 
 class FakeAccountService:
@@ -34,7 +34,7 @@ class RetryBackend:
     def __init__(self, access_token: str):
         self.access_token = access_token
 
-    def images_generations(self, prompt: str, model: str, response_format: str = "b64_json"):
+    def images_generations(self, prompt: str, model: str, response_format: str = "b64_json", **kwargs):
         if self.access_token == "token-1":
             raise RuntimeError("no downloadable image result found; conversation_id=test")
         return {
@@ -47,7 +47,7 @@ class RetryStreamBackend:
     def __init__(self, access_token: str):
         self.access_token = access_token
 
-    def stream_image_chat_completions(self, prompt: str, model: str, images=None):
+    def stream_image_chat_completions(self, prompt: str, model: str, images=None, options=None):
         if self.access_token == "token-1":
             raise RuntimeError("no downloadable image result found; conversation_id=test")
         yield {
@@ -78,11 +78,18 @@ class AlwaysFailBackend:
     def __init__(self, access_token: str):
         self.access_token = access_token
 
-    def images_generations(self, prompt: str, model: str, response_format: str = "b64_json"):
+    def images_generations(self, prompt: str, model: str, response_format: str = "b64_json", **kwargs):
         raise RuntimeError("no downloadable image result found; conversation_id=test")
 
 
 class ImageRetryPoolTests(unittest.TestCase):
+    def test_http2_internal_error_is_retryable(self):
+        self.assertTrue(
+            is_retryable_image_error(
+                "Failed to perform, curl: (92) HTTP/2 stream 1 was not closed cleanly: INTERNAL_ERROR (err 2)."
+            )
+        )
+
     def test_generate_with_pool_retries_next_token(self):
         account_service = FakeAccountService()
         service = ChatGPTService(account_service)
