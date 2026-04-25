@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
+import re
 from time import perf_counter
 import uuid
 
@@ -13,8 +15,11 @@ from api.support import raise_image_quota_error, require_api_access, resolve_ima
 from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService, ImageGenerationError
 from services.newapi_service import NewAPIRequestError, NewAPIService
-from services.request_log_service import request_log_store
+from services.request_log_service import MAX_PREVIEW_IMAGES_PER_LOG, request_log_store, save_request_log_preview
 from utils.helper import extract_chat_prompt, extract_response_prompt, is_image_chat_request, sse_json_stream
+
+DATA_URL_IMAGE_RE = re.compile(r"(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)")
+MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
 
 class ImageGenerationRequest(BaseModel):
@@ -83,19 +88,163 @@ def _to_image_http_exception(exc: Exception) -> HTTPException:
         return http_exc
 
 
-def _image_response_summary(result: object) -> dict[str, object]:
+def _decode_base64_image(image_b64: object) -> bytes | None:
+    text = str(image_b64 or "").strip()
+    if not text:
+        return None
+    try:
+        return base64.b64decode(text, validate=True)
+    except Exception:
+        return None
+
+
+def _append_preview_url(preview_urls: list[str], preview_url: str) -> None:
+    normalized = str(preview_url or "").strip()
+    if not normalized or normalized in preview_urls:
+        return
+    if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+        return
+    preview_urls.append(normalized)
+
+
+def _add_preview_from_bytes(preview_urls: list[str], image_data: bytes | None, *, base_url: str | None = None) -> None:
+    if not image_data or len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+        return
+    preview_url = save_request_log_preview(image_data, base_url=base_url)
+    if preview_url:
+        _append_preview_url(preview_urls, preview_url)
+
+
+def _add_preview_from_source(preview_urls: list[str], source: object, *, base_url: str | None = None) -> None:
+    normalized = str(source or "").strip()
+    if not normalized:
+        return
+    if normalized.lower().startswith("data:image/"):
+        _, _, image_b64 = normalized.partition(",")
+        _add_preview_from_bytes(preview_urls, _decode_base64_image(image_b64), base_url=base_url)
+        return
+    _append_preview_url(preview_urls, normalized)
+
+
+def _collect_preview_urls_from_content(content: object, *, base_url: str | None = None) -> list[str]:
+    preview_urls: list[str] = []
+    seen_sources: set[str] = set()
+
+    def add_source(source: object) -> None:
+        normalized = str(source or "").strip()
+        if not normalized or normalized in seen_sources:
+            return
+        seen_sources.add(normalized)
+        _add_preview_from_source(preview_urls, normalized, base_url=base_url)
+
+    def add_base64(image_b64: object) -> None:
+        normalized = str(image_b64 or "").strip()
+        if not normalized or normalized in seen_sources:
+            return
+        seen_sources.add(normalized)
+        _add_preview_from_bytes(preview_urls, _decode_base64_image(normalized), base_url=base_url)
+
+    def visit(value: object) -> None:
+        if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+            return
+        if isinstance(value, str):
+            for source in MARKDOWN_IMAGE_RE.findall(value):
+                add_source(source)
+                if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+                    return
+            for source in DATA_URL_IMAGE_RE.findall(value):
+                add_source(source)
+                if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+                    return
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+                if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+                    return
+            return
+        if not isinstance(value, dict):
+            return
+
+        for key in ("b64_json", "result"):
+            if key in value:
+                add_base64(value.get(key))
+                if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+                    return
+
+        for key in ("image_url", "url"):
+            candidate = value.get(key)
+            if isinstance(candidate, dict):
+                candidate = candidate.get("url") or candidate.get("image_url")
+            add_source(candidate)
+            if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+                return
+
+        for key in ("content", "text", "input_text", "output_text"):
+            if key in value:
+                visit(value.get(key))
+                if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+                    return
+
+    visit(content)
+    return preview_urls
+
+
+def _collect_preview_urls_from_result(result: object, *, base_url: str | None = None) -> list[str]:
+    if not isinstance(result, dict):
+        return []
+
+    preview_urls: list[str] = []
+
+    data = result.get("data")
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            _append_preview_url(preview_urls, str(item.get("url") or ""))
+            _add_preview_from_bytes(preview_urls, _decode_base64_image(item.get("b64_json")), base_url=base_url)
+            if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+                break
+
+    choices = result.get("choices")
+    if isinstance(choices, list):
+        for item in choices:
+            if not isinstance(item, dict):
+                continue
+            message = item.get("message")
+            for preview_url in _collect_preview_urls_from_content(message, base_url=base_url):
+                _append_preview_url(preview_urls, preview_url)
+            if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+                break
+
+    output = result.get("output")
+    if isinstance(output, list):
+        for item in output:
+            for preview_url in _collect_preview_urls_from_content(item, base_url=base_url):
+                _append_preview_url(preview_urls, preview_url)
+            if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+                break
+
+    return preview_urls
+
+
+def _image_response_summary(result: object, *, base_url: str | None = None) -> dict[str, object]:
     if not isinstance(result, dict):
         return {}
     data = result.get("data")
     image_count = len(data) if isinstance(data, list) else 0
     created = result.get("created")
-    return {
+    summary = {
         "image_count": image_count,
         "created": int(created) if str(created or "").strip() else None,
     }
+    preview_urls = _collect_preview_urls_from_result(result, base_url=base_url)
+    if preview_urls:
+        summary["preview_urls"] = preview_urls
+    return summary
 
 
-def _chat_response_summary(result: object) -> dict[str, object]:
+def _chat_response_summary(result: object, *, base_url: str | None = None) -> dict[str, object]:
     if not isinstance(result, dict):
         return {}
     summary: dict[str, object] = {}
@@ -113,6 +262,9 @@ def _chat_response_summary(result: object) -> dict[str, object]:
     status = result.get("status")
     if isinstance(status, str) and status.strip():
         summary["status"] = status.strip()
+    preview_urls = _collect_preview_urls_from_result(result, base_url=base_url)
+    if preview_urls:
+        summary["preview_urls"] = preview_urls
     return summary
 
 
@@ -228,6 +380,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
         require_api_access(request, authorization)
         request_id = uuid.uuid4().hex
         started_at = perf_counter()
+        preview_base_url = resolve_image_base_url(request)
         request_summary = {
             "prompt_preview": _truncate_text(body.prompt),
             "n": body.n,
@@ -264,7 +417,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                     request_summary=request_summary,
                     status_code=200,
                     success=True,
-                    response_summary=_image_response_summary(result),
+                    response_summary=_image_response_summary(result, base_url=preview_base_url),
                 )
                 return result
             except NewAPIRequestError as exc:
@@ -281,7 +434,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 )
                 _raise_newapi_http_error(exc)
 
-        base_url = resolve_image_base_url(request)
+        base_url = preview_base_url
         try:
             if body.stream:
                 await run_in_threadpool(account_service.get_available_access_token)
@@ -327,7 +480,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 request_summary=request_summary,
                 status_code=200,
                 success=True,
-                response_summary=_image_response_summary(result),
+                response_summary=_image_response_summary(result, base_url=preview_base_url),
             )
             return result
         except RuntimeError as exc:
@@ -400,6 +553,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
         require_api_access(request, authorization)
         request_id = uuid.uuid4().hex
         started_at = perf_counter()
+        preview_base_url = resolve_image_base_url(request)
         uploads = [*(image or []), *(image_list or [])]
         request_summary = {
             "prompt_preview": _truncate_text(prompt),
@@ -506,7 +660,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                     request_summary=request_summary,
                     status_code=200,
                     success=True,
-                    response_summary=_image_response_summary(result),
+                    response_summary=_image_response_summary(result, base_url=preview_base_url),
                 )
                 return result
             except NewAPIRequestError as exc:
@@ -523,7 +677,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 )
                 _raise_newapi_http_error(exc)
 
-        base_url = resolve_image_base_url(request)
+        base_url = preview_base_url
         try:
             if stream:
                 if not account_service.has_available_account():
@@ -565,7 +719,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 request_summary=request_summary,
                 status_code=200,
                 success=True,
-                response_summary=_image_response_summary(result),
+                response_summary=_image_response_summary(result, base_url=preview_base_url),
             )
             return result
         except ImageGenerationError as exc:
@@ -620,6 +774,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
         request_id = uuid.uuid4().hex
         started_at = perf_counter()
         image_request = is_image_chat_request(payload)
+        preview_base_url = resolve_image_base_url(request)
         request_summary = {
             "prompt_preview": _truncate_text(extract_chat_prompt(payload)),
             "stream": bool(payload.get("stream")),
@@ -646,7 +801,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                     return result
 
                 result = await run_in_threadpool(newapi_service.create_chat_completion, request_headers, payload)
-                response_summary = _chat_response_summary(result)
+                response_summary = _chat_response_summary(result, base_url=preview_base_url)
                 response_summary["image_request"] = image_request
                 _write_request_log(
                     request,
@@ -699,7 +854,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 return result
 
             result = await run_in_threadpool(chatgpt_service.create_chat_completion, payload)
-            response_summary = _chat_response_summary(result)
+            response_summary = _chat_response_summary(result, base_url=preview_base_url)
             response_summary["image_request"] = image_request
             _write_request_log(
                 request,
@@ -750,6 +905,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
         payload = body.model_dump(mode="python")
         request_id = uuid.uuid4().hex
         started_at = perf_counter()
+        preview_base_url = resolve_image_base_url(request)
         request_summary = {
             "prompt_preview": _truncate_text(extract_response_prompt(payload.get("input"))),
             "stream": bool(payload.get("stream")),
@@ -784,7 +940,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                     request_summary=request_summary,
                     status_code=200,
                     success=True,
-                    response_summary=_chat_response_summary(result),
+                    response_summary=_chat_response_summary(result, base_url=preview_base_url),
                 )
                 return result
             except NewAPIRequestError as exc:
@@ -830,7 +986,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 request_summary=request_summary,
                 status_code=200,
                 success=True,
-                response_summary=_chat_response_summary(result),
+                response_summary=_chat_response_summary(result, base_url=preview_base_url),
             )
             return result
         except HTTPException as exc:

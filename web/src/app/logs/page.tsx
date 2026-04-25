@@ -63,7 +63,10 @@ function formatValue(value: unknown) {
 }
 
 function getSummaryEntries(summary: Record<string, unknown>) {
-  return Object.entries(summary).filter(([, value]) => {
+  return Object.entries(summary).filter(([key, value]) => {
+    if (key === "preview_urls") {
+      return false;
+    }
     if (value === null || value === undefined || value === "") {
       return false;
     }
@@ -77,6 +80,16 @@ function getSummaryEntries(summary: Record<string, unknown>) {
 function getPromptPreview(item: RequestLogItem) {
   const value = item.request["prompt_preview"];
   return typeof value === "string" && value.trim() ? value : "—";
+}
+
+function getPreviewUrls(item: RequestLogItem) {
+  const value = item.response["preview_urls"];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
 }
 
 function getStatusVariant(item: RequestLogItem) {
@@ -241,6 +254,7 @@ export default function LogsPage() {
               {items.map((item) => {
                 const requestSummary = getSummaryEntries(item.request);
                 const responseSummary = getSummaryEntries(item.response);
+                const previewUrls = getPreviewUrls(item);
 
                 return (
                   <article
@@ -260,6 +274,26 @@ export default function LogsPage() {
                         {item.error ? (
                           <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-700">
                             {item.error}
+                          </div>
+                        ) : null}
+                        {previewUrls.length > 0 ? (
+                          <div className="grid max-w-4xl grid-cols-2 gap-3 pt-1 sm:grid-cols-3 xl:grid-cols-4">
+                            {previewUrls.map((previewUrl, index) => (
+                              <a
+                                key={`${item.request_id}-${previewUrl}`}
+                                href={previewUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="group overflow-hidden rounded-2xl border border-stone-200 bg-stone-50"
+                              >
+                                <img
+                                  src={previewUrl}
+                                  alt={`request-log-preview-${index + 1}`}
+                                  className="aspect-square w-full object-cover transition duration-200 group-hover:scale-[1.02]"
+                                  loading="lazy"
+                                />
+                              </a>
+                            ))}
                           </div>
                         ) : null}
                       </div>
