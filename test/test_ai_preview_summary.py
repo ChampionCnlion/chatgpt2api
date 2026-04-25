@@ -4,7 +4,7 @@ import base64
 import unittest
 from unittest.mock import patch
 
-from api.ai import _chat_response_summary, _image_response_summary
+from api.ai import _chat_response_summary, _collect_preview_urls_from_content, _image_response_summary
 
 
 class AIPreviewSummaryTests(unittest.TestCase):
@@ -58,6 +58,40 @@ class AIPreviewSummaryTests(unittest.TestCase):
 
         self.assertEqual(summary.get("image_count"), 1)
         self.assertEqual(summary.get("preview_urls"), ["https://example.com/images/a.png"])
+
+    def test_collect_preview_urls_from_stream_chat_chunk(self):
+        image_b64 = base64.b64encode(b"preview-image-bytes").decode("utf-8")
+        chunk = {
+            "choices": [
+                {
+                    "delta": {
+                        "content": f"![image](data:image/png;base64,{image_b64})",
+                    }
+                }
+            ]
+        }
+
+        with patch("api.ai.save_request_log_preview", return_value="https://example.com/images/request-logs/c.webp") as mocked_save:
+            preview_urls = _collect_preview_urls_from_content(chunk, base_url="https://example.com")
+
+        self.assertEqual(preview_urls, ["https://example.com/images/request-logs/c.webp"])
+        mocked_save.assert_called_once()
+
+    def test_collect_preview_urls_from_stream_response_event(self):
+        image_b64 = base64.b64encode(b"preview-image-bytes").decode("utf-8")
+        event = {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "image_generation_call",
+                "result": image_b64,
+            },
+        }
+
+        with patch("api.ai.save_request_log_preview", return_value="https://example.com/images/request-logs/d.webp") as mocked_save:
+            preview_urls = _collect_preview_urls_from_content(event, base_url="https://example.com")
+
+        self.assertEqual(preview_urls, ["https://example.com/images/request-logs/d.webp"])
+        mocked_save.assert_called_once()
 
 
 if __name__ == "__main__":

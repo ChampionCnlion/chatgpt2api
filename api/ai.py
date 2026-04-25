@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+import json
 import re
 from time import perf_counter
 import uuid
@@ -16,7 +17,7 @@ from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService, ImageGenerationError
 from services.newapi_service import NewAPIRequestError, NewAPIService
 from services.request_log_service import MAX_PREVIEW_IMAGES_PER_LOG, request_log_store, save_request_log_preview
-from utils.helper import extract_chat_prompt, extract_response_prompt, is_image_chat_request, sse_json_stream
+from utils.helper import extract_chat_prompt, extract_response_prompt, has_response_image_generation_tool, is_image_chat_request
 
 DATA_URL_IMAGE_RE = re.compile(r"(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)")
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -186,6 +187,12 @@ def _collect_preview_urls_from_content(content: object, *, base_url: str | None 
                 if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
                     return
 
+        for key in ("message", "delta", "item", "response", "choices", "output", "data"):
+            if key in value:
+                visit(value.get(key))
+                if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
+                    return
+
     visit(content)
     return preview_urls
 
@@ -209,10 +216,7 @@ def _collect_preview_urls_from_result(result: object, *, base_url: str | None = 
     choices = result.get("choices")
     if isinstance(choices, list):
         for item in choices:
-            if not isinstance(item, dict):
-                continue
-            message = item.get("message")
-            for preview_url in _collect_preview_urls_from_content(message, base_url=base_url):
+            for preview_url in _collect_preview_urls_from_content(item, base_url=base_url):
                 _append_preview_url(preview_urls, preview_url)
             if len(preview_urls) >= MAX_PREVIEW_IMAGES_PER_LOG:
                 break
@@ -301,6 +305,65 @@ def _write_request_log(
         )
     except Exception as exc:
         print(f"[request-log] failed to append log: {exc}")
+
+
+def _to_stream_http_exception(exc: Exception, *, image_request: bool = False) -> HTTPException:
+    if isinstance(exc, HTTPException):
+        return exc
+    if image_request:
+        return _to_image_http_exception(exc)
+    return HTTPException(status_code=502, detail={"error": str(exc) or exc.__class__.__name__})
+
+
+def _logged_sse_json_stream(
+    items,
+    request: Request,
+    *,
+    request_id: str,
+    started_at: float,
+    endpoint: str,
+    model: str,
+    request_summary: dict[str, object],
+    response_summary: dict[str, object] | None = None,
+    base_url: str | None = None,
+    image_request: bool = False,
+):
+    preview_urls: list[str] = []
+    success = True
+    status_code = 200
+    error = ""
+    finalized_summary = dict(response_summary or {})
+
+    yield ": stream-open\n\n"
+    try:
+        for item in items:
+            for preview_url in _collect_preview_urls_from_content(item, base_url=base_url):
+                _append_preview_url(preview_urls, preview_url)
+            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+    except Exception as exc:
+        success = False
+        http_exc = _to_stream_http_exception(exc, image_request=image_request)
+        status_code = http_exc.status_code
+        error = _extract_error_message(http_exc)
+        yield (
+            f"data: {json.dumps({'error': {'message': error, 'type': exc.__class__.__name__}}, ensure_ascii=False)}\n\n"
+        )
+    yield "data: [DONE]\n\n"
+
+    if preview_urls:
+        finalized_summary["preview_urls"] = preview_urls
+    _write_request_log(
+        request,
+        request_id=request_id,
+        started_at=started_at,
+        endpoint=endpoint,
+        model=model,
+        request_summary=request_summary,
+        status_code=status_code,
+        success=success,
+        error=error,
+        response_summary=finalized_summary,
+    )
 
 
 def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService) -> APIRouter:
@@ -439,27 +502,25 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
             if body.stream:
                 await run_in_threadpool(account_service.get_available_access_token)
                 result = StreamingResponse(
-                    sse_json_stream(
+                    _logged_sse_json_stream(
                         chatgpt_service.stream_image_generation(
                             body.prompt,
                             body.model,
                             body.n,
                             body.response_format,
                             base_url,
-                        )
+                        ),
+                        request,
+                        request_id=request_id,
+                        started_at=started_at,
+                        endpoint=request.url.path,
+                        model=body.model,
+                        request_summary=request_summary,
+                        response_summary={"stream": True},
+                        base_url=preview_base_url,
+                        image_request=True,
                     ),
                     media_type="text/event-stream",
-                )
-                _write_request_log(
-                    request,
-                    request_id=request_id,
-                    started_at=started_at,
-                    endpoint=request.url.path,
-                    model=body.model,
-                    request_summary=request_summary,
-                    status_code=200,
-                    success=True,
-                    response_summary={"stream": True},
                 )
                 return result
 
@@ -683,21 +744,19 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                 if not account_service.has_available_account():
                     raise_image_quota_error(RuntimeError("no available image quota"))
                 result = StreamingResponse(
-                    sse_json_stream(
-                        chatgpt_service.stream_image_edit(prompt, images, model, n, response_format, base_url)
+                    _logged_sse_json_stream(
+                        chatgpt_service.stream_image_edit(prompt, images, model, n, response_format, base_url),
+                        request,
+                        request_id=request_id,
+                        started_at=started_at,
+                        endpoint=request.url.path,
+                        model=model,
+                        request_summary=request_summary,
+                        response_summary={"stream": True},
+                        base_url=preview_base_url,
+                        image_request=True,
                     ),
                     media_type="text/event-stream",
-                )
-                _write_request_log(
-                    request,
-                    request_id=request_id,
-                    started_at=started_at,
-                    endpoint=request.url.path,
-                    model=model,
-                    request_summary=request_summary,
-                    status_code=200,
-                    success=True,
-                    response_summary={"stream": True},
                 )
                 return result
 
@@ -837,19 +896,19 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                     except RuntimeError as exc:
                         raise_image_quota_error(exc)
                 result = StreamingResponse(
-                    sse_json_stream(chatgpt_service.stream_chat_completion(payload)),
+                    _logged_sse_json_stream(
+                        chatgpt_service.stream_chat_completion(payload),
+                        request,
+                        request_id=request_id,
+                        started_at=started_at,
+                        endpoint=request.url.path,
+                        model=str(payload.get("model") or ""),
+                        request_summary=request_summary,
+                        response_summary={"stream": True, "image_request": image_request},
+                        base_url=preview_base_url,
+                        image_request=image_request,
+                    ),
                     media_type="text/event-stream",
-                )
-                _write_request_log(
-                    request,
-                    request_id=request_id,
-                    started_at=started_at,
-                    endpoint=request.url.path,
-                    model=str(payload.get("model") or ""),
-                    request_summary=request_summary,
-                    status_code=200,
-                    success=True,
-                    response_summary={"stream": True, "image_request": image_request},
                 )
                 return result
 
@@ -906,10 +965,12 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
         request_id = uuid.uuid4().hex
         started_at = perf_counter()
         preview_base_url = resolve_image_base_url(request)
+        response_image_request = has_response_image_generation_tool(payload)
         request_summary = {
             "prompt_preview": _truncate_text(extract_response_prompt(payload.get("input"))),
             "stream": bool(payload.get("stream")),
             "tool_count": len(payload.get("tools") or []) if isinstance(payload.get("tools"), list) else 0,
+            "image_request": response_image_request,
         }
 
         if newapi_service.is_enabled():
@@ -926,7 +987,7 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
                         request_summary=request_summary,
                         status_code=200,
                         success=True,
-                        response_summary={"stream": True},
+                        response_summary={"stream": True, "image_request": response_image_request},
                     )
                     return result
 
@@ -960,19 +1021,19 @@ def create_router(chatgpt_service: ChatGPTService, newapi_service: NewAPIService
         try:
             if bool(payload.get("stream")):
                 result = StreamingResponse(
-                    sse_json_stream(chatgpt_service.stream_response(payload)),
+                    _logged_sse_json_stream(
+                        chatgpt_service.stream_response(payload),
+                        request,
+                        request_id=request_id,
+                        started_at=started_at,
+                        endpoint=request.url.path,
+                        model=str(payload.get("model") or ""),
+                        request_summary=request_summary,
+                        response_summary={"stream": True, "image_request": response_image_request},
+                        base_url=preview_base_url,
+                        image_request=response_image_request,
+                    ),
                     media_type="text/event-stream",
-                )
-                _write_request_log(
-                    request,
-                    request_id=request_id,
-                    started_at=started_at,
-                    endpoint=request.url.path,
-                    model=str(payload.get("model") or ""),
-                    request_summary=request_summary,
-                    status_code=200,
-                    success=True,
-                    response_summary={"stream": True},
                 )
                 return result
 
