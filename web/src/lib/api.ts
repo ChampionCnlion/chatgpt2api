@@ -217,6 +217,8 @@ export type CPARemoteFile = {
   email: string;
   type?: string;
   provider?: string;
+  status?: string;
+  unavailable?: boolean;
   status_code?: number | null;
   status_message?: string;
 };
@@ -278,15 +280,15 @@ export async function fetchCPAPoolImportJob(poolId: string) {
   return httpRequest<{ import_job: CPAImportJob | null }>(`/api/cpa/pools/${poolId}/import`);
 }
 
-export async function startCPARecover401(poolId: string) {
-  return httpRequest<{ recover_job: CPAImportJob | null }>(`/api/cpa/pools/${poolId}/recover-401`, {
+export async function startCPARecoverExhausted(poolId: string, limit?: number) {
+  return httpRequest<{ recover_job: CPAImportJob | null }>(`/api/cpa/pools/${poolId}/recover-exhausted`, {
     method: "POST",
-    body: {},
+    body: limit ? { limit } : {},
   });
 }
 
 export async function fetchCPAPoolRecoverJob(poolId: string) {
-  return httpRequest<{ recover_job: CPAImportJob | null }>(`/api/cpa/pools/${poolId}/recover-401`);
+  return httpRequest<{ recover_job: CPAImportJob | null }>(`/api/cpa/pools/${poolId}/recover-exhausted`);
 }
 
 // ── Sub2API ────────────────────────────────────────────────────────

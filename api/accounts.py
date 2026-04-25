@@ -56,6 +56,10 @@ class CPAImportRequest(BaseModel):
     names: list[str] = Field(default_factory=list)
 
 
+class CPARecoverRequest(BaseModel):
+    limit: int | None = Field(default=None, ge=1)
+
+
 class Sub2APIServerCreateRequest(BaseModel):
     name: str = ""
     base_url: str = ""
@@ -233,10 +237,12 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=404, detail={"error": "pool not found"})
         return {"import_job": pool.get("import_job")}
 
-    @router.post("/api/cpa/pools/{pool_id}/recover-401")
-    async def cpa_pool_recover_401(
+    @router.post("/api/cpa/pools/{pool_id}/recover-exhausted")
+    @router.post("/api/cpa/pools/{pool_id}/recover-401", include_in_schema=False)
+    async def cpa_pool_recover_exhausted(
         pool_id: str,
         request: Request,
+        body: CPARecoverRequest | None = None,
         authorization: str | None = Header(default=None),
     ):
         require_admin_access(request, authorization)
@@ -244,15 +250,16 @@ def create_router() -> APIRouter:
         if pool is None:
             raise HTTPException(status_code=404, detail={"error": "pool not found"})
         try:
-            job = await run_in_threadpool(cpa_import_service.start_recover_401, pool)
+            job = await run_in_threadpool(cpa_import_service.start_recover_exhausted, pool, body.limit if body else None)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
         return {"recover_job": job}
 
-    @router.get("/api/cpa/pools/{pool_id}/recover-401")
-    async def cpa_pool_recover_401_progress(
+    @router.get("/api/cpa/pools/{pool_id}/recover-exhausted")
+    @router.get("/api/cpa/pools/{pool_id}/recover-401", include_in_schema=False)
+    async def cpa_pool_recover_exhausted_progress(
         pool_id: str,
         request: Request,
         authorization: str | None = Header(default=None),

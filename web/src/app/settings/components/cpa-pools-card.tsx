@@ -5,6 +5,7 @@ import { Import, LoaderCircle, Pencil, Plus, RotateCcw, ServerCog, Trash2 } from
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { type CPAImportJob } from "@/lib/api";
 
 import { useSettingsStore } from "../store";
@@ -39,7 +40,7 @@ function JobSummary({ title, job }: { title: string; job: CPAImportJob }) {
           <span>新增 {job.added}</span>
           <span>跳过 {job.skipped}</span>
           <span>刷新 {job.refreshed}</span>
-          <span>删除 {job.deleted}</span>
+          {job.deleted > 0 ? <span>远端删除 {job.deleted}</span> : null}
           <span>失败 {job.failed}</span>
         </div>
       </div>
@@ -53,11 +54,13 @@ export function CPAPoolsCard() {
   const deletingId = useSettingsStore((state) => state.deletingId);
   const loadingFilesId = useSettingsStore((state) => state.loadingFilesId);
   const recoveringId = useSettingsStore((state) => state.recoveringId);
+  const recoverLimit = useSettingsStore((state) => state.recoverLimit);
+  const setRecoverLimit = useSettingsStore((state) => state.setRecoverLimit);
   const openAddDialog = useSettingsStore((state) => state.openAddDialog);
   const openEditDialog = useSettingsStore((state) => state.openEditDialog);
   const deletePool = useSettingsStore((state) => state.deletePool);
   const browseFiles = useSettingsStore((state) => state.browseFiles);
-  const startRecover401 = useSettingsStore((state) => state.startRecover401);
+  const startRecoverExhausted = useSettingsStore((state) => state.startRecoverExhausted);
 
   return (
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
@@ -69,11 +72,22 @@ export function CPAPoolsCard() {
             </div>
             <div>
               <h2 className="text-lg font-semibold tracking-tight">CPA 连接管理</h2>
-              <p className="text-sm text-stone-500">支持手动选择导入，也支持一键回收 CPA 中标记为 401 的账号。</p>
+              <p className="text-sm text-stone-500">支持手动选择导入，也支持一键导入 CPA 中已额度用完的账号。</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
             {pools.length > 0 ? <Badge className="rounded-md px-2.5 py-1">{pools.length} 个连接</Badge> : null}
+            <div className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-1.5">
+              <span className="text-xs font-medium whitespace-nowrap text-stone-500">导入上限</span>
+              <Input
+                type="number"
+                min="1"
+                step="1"
+                value={recoverLimit}
+                onChange={(event) => setRecoverLimit(event.target.value)}
+                className="h-8 w-[72px] border-0 bg-transparent px-0 text-center text-sm font-medium text-stone-700 shadow-none focus-visible:ring-0"
+              />
+            </div>
             <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={openAddDialog}>
               <Plus className="size-4" />
               添加连接
@@ -157,7 +171,7 @@ export function CPAPoolsCard() {
                     <Button
                       variant="outline"
                       className="h-8 rounded-lg border-stone-200 bg-white px-3 text-xs text-stone-600"
-                      onClick={() => void startRecover401(pool)}
+                      onClick={() => void startRecoverExhausted(pool)}
                       disabled={isBusy}
                     >
                       {recoveringId === pool.id ? (
@@ -165,12 +179,12 @@ export function CPAPoolsCard() {
                       ) : (
                         <RotateCcw className="size-3.5" />
                       )}
-                      回收 401
+                      导入额度用完
                     </Button>
                   </div>
 
                   {pool.import_job ? <JobSummary title="手动导入任务" job={pool.import_job} /> : null}
-                  {pool.recover_job ? <JobSummary title="401 回收任务" job={pool.recover_job} /> : null}
+                  {pool.recover_job ? <JobSummary title="额度用完导入任务" job={pool.recover_job} /> : null}
                 </div>
               );
             })}
@@ -181,9 +195,10 @@ export function CPAPoolsCard() {
           <p className="font-medium text-stone-600">使用说明</p>
           <ul className="mt-1 list-inside list-disc space-y-0.5">
             <li>手动导入会先读取远程账号列表，再由你选择需要导入的账号。</li>
-            <li>401 回收会自动筛选 CPA 中状态码或错误信息包含 401 的账号。</li>
-            <li>回收任务会把 401 账号导入本地号池，并在成功取到 token 后删除 CPA 远端对应文件。</li>
-            <li>同一个 CPA 连接同一时间只允许执行一个任务，避免导入和回收相互冲突。</li>
+            <li>额度用完导入会自动筛选 CPA 中已用尽额度的账号，例如 `usage_limit_reached`。</li>
+            <li>区块顶部的导入上限默认是 50，本次任务只会导入命中的前 N 个账号。</li>
+            <li>该任务只会把账号导入本地号池，不会删除 CPA 远端文件。</li>
+            <li>同一个 CPA 连接同一时间只允许执行一个任务，避免多个导入任务相互冲突。</li>
           </ul>
         </div>
       </CardContent>

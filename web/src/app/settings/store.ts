@@ -10,7 +10,7 @@ import {
   fetchCPAPools,
   fetchSettingsConfig,
   startCPAImport,
-  startCPARecover401,
+  startCPARecoverExhausted,
   updateCPAPool,
   updateSettingsConfig,
   type CPAPool,
@@ -55,6 +55,8 @@ function normalizeFiles(items: CPARemoteFile[]) {
       email: String(item.email || "").trim(),
       type: typeof item.type === "string" ? item.type : "",
       provider: typeof item.provider === "string" ? item.provider : "",
+      status: typeof item.status === "string" ? item.status : "",
+      unavailable: Boolean(item.unavailable),
       status_code: typeof item.status_code === "number" ? item.status_code : null,
       status_message: typeof item.status_message === "string" ? item.status_message : "",
     });
@@ -76,6 +78,7 @@ type SettingsStore = {
   deletingId: string | null;
   loadingFilesId: string | null;
   recoveringId: string | null;
+  recoverLimit: string;
 
   dialogOpen: boolean;
   editingPool: CPAPool | null;
@@ -108,6 +111,7 @@ type SettingsStore = {
   setNewAPITimeoutSeconds: (value: string) => void;
 
   loadPools: (silent?: boolean) => Promise<void>;
+  setRecoverLimit: (value: string) => void;
   openAddDialog: () => void;
   openEditDialog: (pool: CPAPool) => void;
   setDialogOpen: (open: boolean) => void;
@@ -117,7 +121,7 @@ type SettingsStore = {
   setShowSecret: (checked: boolean) => void;
   savePool: () => Promise<void>;
   deletePool: (pool: CPAPool) => Promise<void>;
-  startRecover401: (pool: CPAPool) => Promise<void>;
+  startRecoverExhausted: (pool: CPAPool) => Promise<void>;
 
   browseFiles: (pool: CPAPool) => Promise<void>;
   setBrowserOpen: (open: boolean) => void;
@@ -139,6 +143,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   deletingId: null,
   loadingFilesId: null,
   recoveringId: null,
+  recoverLimit: "50",
 
   dialogOpen: false,
   editingPool: null,
@@ -310,6 +315,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
+  setRecoverLimit: (value) => {
+    set({ recoverLimit: value });
+  },
+
   openAddDialog: () => {
     set({
       editingPool: null,
@@ -402,20 +411,27 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
-  startRecover401: async (pool) => {
+  startRecoverExhausted: async (pool) => {
+    const recoverLimit = String(get().recoverLimit || "").trim();
+    const limit = Number.parseInt(recoverLimit, 10);
+    if (!Number.isInteger(limit) || limit <= 0) {
+      toast.error("导入上限必须是大于 0 的整数");
+      return;
+    }
+
     set({ recoveringId: pool.id });
     try {
-      const result = await startCPARecover401(pool.id);
+      const result = await startCPARecoverExhausted(pool.id, limit);
       set((state) => ({
         pools: updatePoolInList(state.pools, pool.id, { recover_job: result.recover_job }),
       }));
       if (result.recover_job?.total) {
-        toast.success(`401 回收任务已启动，共 ${result.recover_job.total} 个远端账号`);
+        toast.success(`额度用完导入任务已启动，本次最多导入 ${limit} 个，命中 ${result.recover_job.total} 个远端账号`);
       } else {
-        toast.success("没有检测到可回收的 401 账号");
+        toast.success("没有检测到额度用完的远端账号");
       }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "启动 401 回收失败");
+      toast.error(error instanceof Error ? error.message : "启动额度用完导入失败");
     } finally {
       set({ recoveringId: null });
     }

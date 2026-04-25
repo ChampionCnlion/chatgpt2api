@@ -20,6 +20,22 @@ from services.proxy_service import proxy_settings
 
 CPA_CONFIG_FILE = DATA_DIR / "cpa_config.json"
 CPA_JOB_FIELDS = ("import_job", "recover_job")
+REMOTE_USAGE_LIMIT_MARKERS = (
+    "usage_limit_reached",
+    "the usage limit has been reached",
+    "usage limit has been reached",
+    "insufficient_quota",
+    "quota exhausted",
+    "quota exceeded",
+    "out of quota",
+    "resource has been exhausted",
+    "额度用完",
+    "额度已用完",
+    "额度耗尽",
+    "额度不足",
+    "用量已达上限",
+    "用量已用完",
+)
 
 
 def _new_id() -> str:
@@ -75,6 +91,7 @@ def _normalize_remote_file(item: dict) -> dict | None:
     if not name:
         return None
     email = str(item.get("email") or item.get("account") or item.get("username") or "").strip()
+    status = str(item.get("status") or "").strip()
     status_message = str(
         item.get("status_message")
         or item.get("statusMessage")
@@ -82,6 +99,14 @@ def _normalize_remote_file(item: dict) -> dict | None:
         or item.get("error")
         or ""
     ).strip()
+    raw_unavailable = item.get("unavailable")
+    unavailable = False
+    if isinstance(raw_unavailable, bool):
+        unavailable = raw_unavailable
+    elif isinstance(raw_unavailable, (int, float)):
+        unavailable = bool(raw_unavailable)
+    elif raw_unavailable is not None:
+        unavailable = str(raw_unavailable).strip().lower() in {"1", "true", "yes", "y"}
     status_code = None
     for key in ("status_code", "statusCode", "code", "status", "http_status", "httpStatus"):
         raw = item.get(key)
@@ -99,9 +124,53 @@ def _normalize_remote_file(item: dict) -> dict | None:
         "email": email,
         "type": str(item.get("type") or "").strip(),
         "provider": str(item.get("provider") or item.get("type") or "").strip(),
+        "status": status,
+        "unavailable": unavailable,
         "status_code": status_code,
         "status_message": status_message,
     }
+
+
+def _parse_remote_status_message(status_message: str) -> dict | None:
+    text = str(status_message or "").strip()
+    if not text or text[:1] not in {"{", "["}:
+        return None
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _iter_remote_status_texts(item: dict) -> list[str]:
+    texts: list[str] = []
+    for key in ("status", "status_message"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            texts.append(value)
+
+    payload = _parse_remote_status_message(str(item.get("status_message") or ""))
+    if not payload:
+        return texts
+
+    error = payload.get("error")
+    if isinstance(error, dict):
+        for key in ("type", "message", "code"):
+            value = str(error.get(key) or "").strip()
+            if value:
+                texts.append(value)
+    for key in ("type", "message", "code"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            texts.append(value)
+    return texts
+
+
+def _has_remote_usage_limit_marker(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in REMOTE_USAGE_LIMIT_MARKERS)
 
 
 def _is_remote_401_file(item: dict) -> bool:
@@ -110,6 +179,18 @@ def _is_remote_401_file(item: dict) -> bool:
         return True
     status_message = str(item.get("status_message") or "").strip()
     if re.search(r"\b401\b", status_message):
+        return True
+    return False
+
+
+def _is_remote_quota_exhausted_file(item: dict) -> bool:
+    if any(_has_remote_usage_limit_marker(text) for text in _iter_remote_status_texts(item)):
+        return True
+
+    status_code = item.get("status_code")
+    status = str(item.get("status") or "").strip().lower()
+    unavailable = bool(item.get("unavailable"))
+    if unavailable and status == "error" and isinstance(status_code, int) and status_code == 429:
         return True
     return False
 
@@ -329,12 +410,18 @@ class CPAImportService:
             delete_remote_after_import=False,
         )
 
-    def start_recover_401(self, pool: dict) -> dict:
+    def start_recover_exhausted(self, pool: dict, limit: int | None = None) -> dict:
         pool_id = str(pool.get("id") or "").strip()
         if self._has_active_job(pool_id):
             raise ValueError("another CPA job is running")
+        if limit is not None:
+            limit = int(limit)
+            if limit <= 0:
+                raise ValueError("limit must be greater than 0")
         files = list_remote_files(pool)
-        names = [str(item.get("name") or "").strip() for item in files if _is_remote_401_file(item)]
+        names = [str(item.get("name") or "").strip() for item in files if _is_remote_quota_exhausted_file(item)]
+        if limit is not None:
+            names = names[:limit]
         if not names:
             job = {
                 "job_id": uuid.uuid4().hex,
@@ -358,8 +445,11 @@ class CPAImportService:
             pool,
             names,
             job_field="recover_job",
-            delete_remote_after_import=True,
+            delete_remote_after_import=False,
         )
+
+    def start_recover_401(self, pool: dict, limit: int | None = None) -> dict:
+        return self.start_recover_exhausted(pool, limit)
 
     def _has_active_job(self, pool_id: str) -> bool:
         for job_field in CPA_JOB_FIELDS:
